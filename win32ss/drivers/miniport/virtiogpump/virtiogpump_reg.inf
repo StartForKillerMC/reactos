@@ -1,0 +1,16 @@
+[AddReg]
+HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\PCI#VEN_1AF4&DEV_1050","Service",0x00000000,"virtiogpump"
+HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\PCI#VEN_1AF4&DEV_1050","ClassGUID",0x00000000,"{4D36E968-E325-11CE-BFC1-08002BE10318}"
+
+HKLM,"SYSTEM\CurrentControlSet\Services\virtiogpump","ErrorControl",0x00010001,0x00000000
+HKLM,"SYSTEM\CurrentControlSet\Services\virtiogpump","Group",0x00000000,"Video"
+HKLM,"SYSTEM\CurrentControlSet\Services\virtiogpump","ImagePath",0x00020000,"system32\drivers\virtiogpump.sys"
+HKLM,"SYSTEM\CurrentControlSet\Services\virtiogpump","Start",0x00010001,0x00000003
+HKLM,"SYSTEM\CurrentControlSet\Services\virtiogpump","Type",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\virtiogpump\Video","Service",0x00000000,"virtiogpump"
+
+HKLM,"SYSTEM\CurrentControlSet\Services\virtiogpump\Device0","Device Description",0x00000000,"VirtIO Graphics Adapter"
+HKLM,"SYSTEM\CurrentControlSet\Services\virtiogpump\Device0","InstalledDisplayDrivers",0x00010000,"framebuf"
+HKLM,"SYSTEM\CurrentControlSet\Services\virtiogpump\Device0","VgaCompatible",0x00010001,0
+HKLM,"SYSTEM\CurrentControlSet\Services\virtiogpump\Device0","DefaultSettings.XResolution",0x00010001,800
+HKLM,"SYSTEM\CurrentControlSet\Services\virtiogpump\Device0","DefaultSettings.YResolution",0x00010001,600

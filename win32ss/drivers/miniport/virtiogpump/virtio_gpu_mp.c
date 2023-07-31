@@ -1,0 +1,677 @@
+#include "virtio_gpu_mp.h"
+
+#include <debug.h>
+
+/*
+ * VirtioGpuMpFindAdapter
+ *
+ * Detects the Virtio Gpu display adapter.
+ */
+
+VP_STATUS
+NTAPI
+VirtioGpuMpFindAdapter(
+    IN PVOID HwDeviceExtension,
+    IN PVOID HwContext,
+    IN PWSTR ArgumentString,
+    IN OUT PVIDEO_PORT_CONFIG_INFO ConfigInfo,
+    OUT PUCHAR Again)
+{
+    ERR_(IHVVIDEO, "VirtioGpuMpFindAdapter\n");
+
+    PVIRTIOGPUMP_DEVICE_EXTENSION VirtioGpuMpDeviceExtension;
+
+    VP_STATUS Status;
+    USHORT VendorId = 0x1AF4;
+    USHORT DeviceId = 0x1050;
+    ULONG Slot = 0;
+
+    VirtioGpuMpDeviceExtension = (PVIRTIOGPUMP_DEVICE_EXTENSION)HwDeviceExtension;
+
+    VIDEO_ACCESS_RANGE AccessRanges[5]; //PCI Don't have more than 5 BAR
+    VideoPortZeroMemory(&AccessRanges, sizeof(AccessRanges));
+    Status = VideoPortGetAccessRanges(HwDeviceExtension, 0, NULL,
+                                      5, AccessRanges,
+                                      &VendorId, &DeviceId, &Slot);
+
+    //Enable busmastering
+    ULONG Command = 0;
+    if(VideoPortGetBusData(HwDeviceExtension, PCIConfiguration, 0, (PVOID) &Command,
+                        FIELD_OFFSET(
+                            PCI_COMMON_CONFIG,
+                            Command
+                        ), sizeof(ULONG)) == 0)
+    {
+        ERR_(IHVVIDEO, "Error reading command config\n");
+        return ERROR_DEV_NOT_EXIST;
+    }
+    Command |= (1 << 2);
+    Command &= ~(1 << 10);
+    if(VideoPortSetBusData(HwDeviceExtension, PCIConfiguration, 0, (PVOID) &Command,
+                        FIELD_OFFSET(
+                            PCI_COMMON_CONFIG,
+                            Command
+                        ), sizeof(ULONG)) == 0)
+    {
+        ERR_(IHVVIDEO, "Error writting command config\n");
+        return ERROR_DEV_NOT_EXIST;
+    }
+
+    //TODO: Check if capabilities are enabled
+
+    UCHAR CapabilityOffset = 0;
+    if(VideoPortGetBusData(HwDeviceExtension, PCIConfiguration, 0, (PVOID) &CapabilityOffset,
+                        FIELD_OFFSET(
+                            PCI_COMMON_CONFIG,
+                            u.type0.CapabilitiesPtr
+                        ), sizeof(UCHAR)) == 0)
+    {
+        ERR_(IHVVIDEO, "Not exist");
+        return ERROR_DEV_NOT_EXIST;
+    }
+
+    ERR_(IHVVIDEO, "Capability Offset: 0x%x\n", CapabilityOffset);
+
+    while(CapabilityOffset) {
+        UCHAR CapabilityID = 0;
+        UCHAR CapabilityNext = 0;
+        if(VideoPortGetBusData(HwDeviceExtension, PCIConfiguration,
+                            0, (PVOID) &CapabilityID,
+                            CapabilityOffset + 0, sizeof(UCHAR)) == 0 ||
+           VideoPortGetBusData(HwDeviceExtension, PCIConfiguration,
+                            0, (PVOID) &CapabilityNext,
+                            CapabilityOffset + 1, sizeof(UCHAR)) == 0)
+        {
+            ERR_(IHVVIDEO, "Not exist\n");
+            return ERROR_DEV_NOT_EXIST;
+        }
+
+        ERR_(IHVVIDEO, "Capability ID: 0x%x Offset: 0x%x\n", CapabilityID, CapabilityOffset);
+
+        if(CapabilityID == 0x09) {
+            UCHAR CapabilityType = 0;
+            if(VideoPortGetBusData(HwDeviceExtension, PCIConfiguration,
+                                0, (PVOID) &CapabilityType,
+                                CapabilityOffset + 3, sizeof(UCHAR)) == 0)
+            {
+                ERR_(IHVVIDEO, "Not exist\n");
+                return ERROR_DEV_NOT_EXIST;
+            }
+
+            ERR_(IHVVIDEO, "Capability Type: 0x%x\n", CapabilityType);
+
+            switch(CapabilityType) {
+                case 0x1:
+                    if(VideoPortGetBusData(HwDeviceExtension, PCIConfiguration,
+                            0, (PVOID) &VirtioGpuMpDeviceExtension->RegistersBarCap, CapabilityOffset + 4,
+                            sizeof(VIRTIOGPUMP_PCI_CAP_HEADER)) == 0)
+                    {
+                        ERR_(IHVVIDEO, "Not exist\n");
+                        return ERROR_DEV_NOT_EXIST;
+                    }
+                    ERR_(IHVVIDEO, "Found Registers Cap Offset: 0x%x\n", CapabilityOffset);
+                    break;
+                case 0x2:
+                    if(VideoPortGetBusData(HwDeviceExtension, PCIConfiguration,
+                            0, (PVOID) &VirtioGpuMpDeviceExtension->NotifyBarCap, CapabilityOffset + 4,
+                            sizeof(VIRTIOGPUMP_PCI_CAP_HEADER)) == 0 ||
+                       VideoPortGetBusData(HwDeviceExtension, PCIConfiguration,
+                            0, (PVOID) &VirtioGpuMpDeviceExtension->NotifyMultiplier,
+                            CapabilityOffset + 16, sizeof(UINT)) == 0)
+                    {
+                        ERR_(IHVVIDEO, "Not exist\n");
+                        return ERROR_DEV_NOT_EXIST;
+                    }
+                    ERR_(IHVVIDEO, "Found Notify Cap Offset: 0x%x\n", CapabilityOffset);
+                    break;
+                case 0x3:
+                    if(VideoPortGetBusData(HwDeviceExtension, PCIConfiguration,
+                            0, (PVOID) &VirtioGpuMpDeviceExtension->IsrBarCap, CapabilityOffset + 4,
+                            sizeof(VIRTIOGPUMP_PCI_CAP_HEADER)) == 0)
+                    {
+                        ERR_(IHVVIDEO, "Not exist\n");
+                        return ERROR_DEV_NOT_EXIST;
+                    }
+                    ERR_(IHVVIDEO, "Found Isr Cap Offset: 0x%x\n", CapabilityOffset);
+                    break;
+                case 0x4:
+                    if(VideoPortGetBusData(HwDeviceExtension, PCIConfiguration,
+                            0, (PVOID) &VirtioGpuMpDeviceExtension->ConfigBarCap, CapabilityOffset + 4,
+                            sizeof(VIRTIOGPUMP_PCI_CAP_HEADER)) == 0)
+                    {
+                        ERR_(IHVVIDEO, "Not exist\n");
+                        return ERROR_DEV_NOT_EXIST;
+                    }
+                    ERR_(IHVVIDEO, "Found Config Cap Offset: 0x%x\n", CapabilityOffset);
+                    break;
+            }
+        }
+
+        CapabilityOffset = CapabilityNext;
+    }
+
+    if(Status == NO_ERROR)
+    {
+        for(INT i = 0; i < 5; i++) {
+            if(VirtioGpuMpDeviceExtension->RegistersBarCap.Index == (i+1) || VirtioGpuMpDeviceExtension->NotifyBarCap.Index == (i+1) ||
+               VirtioGpuMpDeviceExtension->IsrBarCap.Index == (i+1)       || VirtioGpuMpDeviceExtension->ConfigBarCap.Index == (i+1))
+            {
+                VirtioGpuMpDeviceExtension->BarsToMapPhysStart[i] = AccessRanges[i].RangeStart;
+                VirtioGpuMpDeviceExtension->BarsToMapLength[i] = AccessRanges[i].RangeLength;
+            } else {
+                //Set to zero to check for this later
+                VirtioGpuMpDeviceExtension->BarsToMapLength[i] = 0;
+            }
+        }
+    }
+
+    ERR_(IHVVIDEO, "Inited Status: %d, ridx(%d:%d), nidx(%d:%d), iidx(%d:%d), cidx(%d:%d)\n", Status,
+        VirtioGpuMpDeviceExtension->RegistersBarCap.Index, VirtioGpuMpDeviceExtension->RegistersBarCap.Offset,
+        VirtioGpuMpDeviceExtension->NotifyBarCap.Index, VirtioGpuMpDeviceExtension->NotifyBarCap.Offset,
+        VirtioGpuMpDeviceExtension->IsrBarCap.Index, VirtioGpuMpDeviceExtension->IsrBarCap.Offset,
+        VirtioGpuMpDeviceExtension->ConfigBarCap.Index, VirtioGpuMpDeviceExtension->ConfigBarCap.Offset);
+
+    return Status;
+}
+
+VOID
+VirtioGpuMpSetupQueue(
+    IN PVIRTIOGPUMP_DEVICE_EXTENSION VirtioGpuMpDeviceExtension,
+    ULONG Index)
+{
+    PVIRTIOGPUMP_QUEUE_VIRTQUEUE VirtQueue = &VirtioGpuMpDeviceExtension->VirtualQueues[Index];
+    VirtioGpuMpDeviceExtension->Registers->queueSelect = Index;
+    UINT QueueSize = VirtioGpuMpDeviceExtension->Registers->queueSize;
+    VirtioGpuMpDeviceExtension->Registers->queueSize = QueueSize;
+
+    ULONG DescriptorsSize = sizeof(VIRTIOGPUMP_QUEUE_VIRTQUEUE) * QueueSize;
+    ULONG AvailableSize = (QueueSize + 3) * sizeof(USHORT);
+    ULONG UsedSize = (3 * sizeof(USHORT)) + (QueueSize * sizeof(VIRTIOGPUMP_QUEUE_USED_ELEMENT));
+
+    VirtQueue->Descriptors = (volatile PVIRTIOGPUMP_QUEUE_DESCRIPTOR)VideoPortAllocatePool((PVOID)VirtioGpuMpDeviceExtension, VpNonPagedPoolCacheAligned,
+        DescriptorsSize, VGPU_TAG);
+    VideoPortZeroMemory((PVOID)VirtQueue->Descriptors, DescriptorsSize);
+    VirtQueue->Available = (volatile PVIRTIOGPUMP_QUEUE_AVAILABLE)VideoPortAllocatePool((PVOID)VirtioGpuMpDeviceExtension, VpNonPagedPoolCacheAligned,
+        AvailableSize, VGPU_TAG);
+    VideoPortZeroMemory((PVOID)VirtQueue->Available, AvailableSize);
+    VirtQueue->Used = (volatile PVIRTIOGPUMP_QUEUE_USED)VideoPortAllocatePool((PVOID)VirtioGpuMpDeviceExtension, VpNonPagedPoolCacheAligned,
+        UsedSize, VGPU_TAG);
+    VideoPortZeroMemory((PVOID)VirtQueue->Used, UsedSize);
+
+    VirtQueue->FreeList = 0;
+    for(INT i = 0; i < QueueSize; i++)
+    {
+        VirtQueue->Descriptors[i].Next = VirtQueue->FreeList;
+        VirtQueue->FreeList = i;
+        VirtQueue->FreeCount++;
+    }
+
+    VirtQueue->QueueSize = QueueSize;
+    //TODO: Find a proper way to support msvc compiler
+    VirtQueue->QueueMask = (1 << ((sizeof(QueueSize) * 8) - 1 - __builtin_clz(QueueSize))) - 1;
+    VirtQueue->Notify = (volatile PUSHORT)((ULONG_PTR)VirtioGpuMpDeviceExtension->Notify + (ULONG_PTR)(USHORT)VirtioGpuMpDeviceExtension->Registers->queueNotify * (ULONG_PTR)VirtioGpuMpDeviceExtension->NotifyMultiplier);
+    VirtQueue->DescriptorsEndStatus = (PUCHAR)VideoPortAllocatePool((PVOID)VirtioGpuMpDeviceExtension, VpNonPagedPool,
+            sizeof(UCHAR) * QueueSize, VGPU_TAG);
+    for(INT i = 0; i < QueueSize; i++)
+    {
+        VirtQueue->DescriptorsEndStatus[i] = 1; //finished
+    }
+
+    VirtioGpuMpDeviceExtension->Registers->queueDesc = MmGetPhysicalAddress((PVOID)VirtQueue->Descriptors).QuadPart;
+    VirtioGpuMpDeviceExtension->Registers->queueGuest = MmGetPhysicalAddress((PVOID)VirtQueue->Available).QuadPart;
+    VirtioGpuMpDeviceExtension->Registers->queueDevice = MmGetPhysicalAddress((PVOID)VirtQueue->Used).QuadPart;
+    VirtioGpuMpDeviceExtension->Registers->queueMsixVector = 0xFFFF;
+    VirtioGpuMpDeviceExtension->Registers->queueEnable = 0x1;
+
+    VirtioGpuMpDeviceExtension->ActiveQueues |= (1 << Index);
+}
+
+PVIRTIOGPUMP_QUEUE_DESCRIPTOR
+VirtioGpuMpAllocateDescriptors(
+    IN PVIRTIOGPUMP_DEVICE_EXTENSION VirtioGpuMpDeviceExtension,
+    ULONG QueueIndex,
+    UINT Count,
+    PUSHORT FirstDescriptorIndex
+)
+{
+    if(QueueIndex >= VirtioGpuMpDeviceExtension->Registers->numQueues) return NULL;
+    PVIRTIOGPUMP_QUEUE_VIRTQUEUE Queue = &VirtioGpuMpDeviceExtension->VirtualQueues[QueueIndex];
+    if((VirtioGpuMpDeviceExtension->ActiveQueues & (1 << QueueIndex)) == 0 || Queue->FreeCount < Count) return NULL;
+
+    volatile PVIRTIOGPUMP_QUEUE_DESCRIPTOR LastDescriptor = NULL;
+    USHORT LastIndex = 0;
+    while(Count > 0)
+    {
+        USHORT i = Queue->FreeList;
+        volatile PVIRTIOGPUMP_QUEUE_DESCRIPTOR Descriptor = &Queue->Descriptors[i];
+
+        Queue->FreeList = Descriptor->Next;
+        Queue->FreeCount--;
+
+        if(LastDescriptor != NULL)
+        {
+            Descriptor->Flags = VIRTQ_DESC_F_NEXT;
+            Descriptor->Next = LastIndex;
+        }
+        else
+        {
+            Descriptor->Flags = 0;
+            Descriptor->Next = 0;
+        }
+
+        LastDescriptor = Descriptor;
+        LastIndex = i;
+        Count--;
+    }
+
+    if(FirstDescriptorIndex != NULL) *FirstDescriptorIndex = LastIndex;
+
+    return (PVIRTIOGPUMP_QUEUE_DESCRIPTOR)LastDescriptor;
+}
+
+PVIRTIOGPUMP_QUEUE_DESCRIPTOR
+VirtioGpuMpGetNextDescriptor(
+    IN PVIRTIOGPUMP_DEVICE_EXTENSION VirtioGpuMpDeviceExtension,
+    ULONG QueueIndex,
+    UINT DescriptorIndex
+)
+{
+    if(QueueIndex >= VirtioGpuMpDeviceExtension->Registers->numQueues) return NULL;
+    PVIRTIOGPUMP_QUEUE_VIRTQUEUE Queue = &VirtioGpuMpDeviceExtension->VirtualQueues[QueueIndex];
+    if((VirtioGpuMpDeviceExtension->ActiveQueues & (1 << QueueIndex)) == 0) return NULL;
+
+    if(Queue->Descriptors[DescriptorIndex].Next >= Queue->QueueSize) return NULL;
+
+    return (PVIRTIOGPUMP_QUEUE_DESCRIPTOR)&Queue->Descriptors[Queue->Descriptors[DescriptorIndex].Next];
+}
+
+VOID
+VirtioGpuMpFreeDescriptor(
+    IN PVIRTIOGPUMP_DEVICE_EXTENSION VirtioGpuMpDeviceExtension,
+    ULONG QueueIndex,
+    USHORT DescriptorIndex
+)
+{
+    if(QueueIndex >= VirtioGpuMpDeviceExtension->Registers->numQueues) return;
+    PVIRTIOGPUMP_QUEUE_VIRTQUEUE Queue = &VirtioGpuMpDeviceExtension->VirtualQueues[QueueIndex];
+    if((VirtioGpuMpDeviceExtension->ActiveQueues & (1 << QueueIndex)) == 0) return;
+
+    Queue->Descriptors[DescriptorIndex].Next = Queue->FreeList;
+    Queue->FreeList = DescriptorIndex;
+    Queue->FreeCount++;
+}
+
+static
+VOID
+VirtioGpuMpSubmitChain(
+    PVIRTIOGPUMP_QUEUE_VIRTQUEUE Queue,
+    USHORT DescriptorIndex
+)
+{
+    volatile PVIRTIOGPUMP_QUEUE_AVAILABLE Available = (volatile PVIRTIOGPUMP_QUEUE_AVAILABLE)Queue->Available;
+
+    ERR_(IHVVIDEO, "Submitting Descriptor %d to available index %d\n", DescriptorIndex, Available->Index);
+
+    Available->Rings[Available->Index & Queue->QueueMask] = DescriptorIndex;
+    __asm__ __volatile__ ("" ::: "memory");
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    Available->Index++;
+}
+
+static
+VOID
+VirtioGpuMpKickQueue(
+    PVIRTIOGPUMP_QUEUE_VIRTQUEUE Queue,
+    USHORT QueueIndex
+)
+{
+    *Queue->Notify = QueueIndex;
+
+    __asm__ __volatile__ ("" ::: "memory");
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+}
+
+VOID
+VirtioGpuMpSubmitDescriptor(
+    IN PVIRTIOGPUMP_DEVICE_EXTENSION VirtioGpuMpDeviceExtension,
+    ULONG QueueIndex,
+    USHORT DescriptorIndex,
+    SHORT WaitDescriptorIndex
+)
+{
+    if(QueueIndex >= VirtioGpuMpDeviceExtension->Registers->numQueues) return;
+
+    PVIRTIOGPUMP_QUEUE_VIRTQUEUE Queue = &VirtioGpuMpDeviceExtension->VirtualQueues[QueueIndex];
+    if((VirtioGpuMpDeviceExtension->ActiveQueues & (1 << QueueIndex)) == 0) return;
+
+    if(WaitDescriptorIndex >= 0)
+        Queue->DescriptorsEndStatus[WaitDescriptorIndex] = 0; //Working
+
+    VirtioGpuMpSubmitChain(Queue, DescriptorIndex);
+    VirtioGpuMpKickQueue(Queue, QueueIndex);
+
+    if(WaitDescriptorIndex >= 0)
+        while(Queue->DescriptorsEndStatus[WaitDescriptorIndex] != 1);
+}
+
+BOOLEAN
+VirtioGpuMpSendCommandResponse(
+    IN PVIRTIOGPUMP_DEVICE_EXTENSION VirtioGpuMpDeviceExtension,
+    PVOID Cmd,
+    ULONG CmdLength,
+    PVOID *Response,
+    ULONG ResponseLength)
+{
+    USHORT i = 0;
+    PVIRTIOGPUMP_QUEUE_DESCRIPTOR Descriptor = VirtioGpuMpAllocateDescriptors(VirtioGpuMpDeviceExtension, 0, 2, &i);
+    if(Descriptor == NULL)
+    {
+        ERR_(IHVVIDEO, "First Descriptor NULL\n");
+        return FALSE;
+    }
+
+    Descriptor->Address = MmGetPhysicalAddress(Cmd).QuadPart;
+    Descriptor->Length = CmdLength;
+    Descriptor->Flags |= VIRTQ_DESC_F_NEXT;
+
+    USHORT Next = Descriptor->Next;
+    Descriptor = VirtioGpuMpGetNextDescriptor(VirtioGpuMpDeviceExtension, 0, i);
+    if(Descriptor == NULL) {
+        VirtioGpuMpFreeDescriptor(VirtioGpuMpDeviceExtension, 0, i);
+        ERR_(IHVVIDEO, "Second Descriptor NULL\n");
+        return FALSE;
+    }
+
+    PVOID Res = (PVOID)VideoPortAllocatePool((PVOID)VirtioGpuMpDeviceExtension, VpNonPagedPoolCacheAligned,
+            ResponseLength, VGPU_TAG);
+    *Response = Res;
+
+    Descriptor->Address = MmGetPhysicalAddress(Res).QuadPart;
+    Descriptor->Length = ResponseLength;
+    Descriptor->Flags |= VIRTQ_DESC_F_WRITE;
+
+    VirtioGpuMpSubmitDescriptor(VirtioGpuMpDeviceExtension, 0, i, Next);
+    VirtioGpuMpFreeDescriptor(VirtioGpuMpDeviceExtension, 0, Next);
+
+    return TRUE;
+}
+
+/*
+ * VirtioGpuMpInitialize
+ *
+ * Performs the first initialization of the adapter, after the HAL has given
+ * up control of the video hardware to the video port driver.
+ */
+
+BOOLEAN
+NTAPI
+VirtioGpuMpInitialize(IN PVOID HwDeviceExtension)
+{
+    UNIMPLEMENTED;
+    TRACE_(IHVVIDEO, "VirtioGpuMpInitialize\n");
+
+    PVIRTIOGPUMP_DEVICE_EXTENSION VirtioGpuMpDeviceExtension;
+    ULONG inIoSpace = VIDEO_MEMORY_SPACE_MEMORY;
+
+    VirtioGpuMpDeviceExtension = (PVIRTIOGPUMP_DEVICE_EXTENSION)HwDeviceExtension;
+
+    for(INT i = 0; i < 5; i++) {
+        if(VirtioGpuMpDeviceExtension->BarsToMapLength[i] != 0)
+        {
+            if(VideoPortMapMemory(HwDeviceExtension,
+                          VirtioGpuMpDeviceExtension->BarsToMapPhysStart[i],
+                          &VirtioGpuMpDeviceExtension->BarsToMapLength[i],
+                          &inIoSpace,
+                          &VirtioGpuMpDeviceExtension->BarsToMapVirtStart[i]) != NO_ERROR)
+            {
+                ERR_(IHVVIDEO, "Failed to map memory\n");
+                return FALSE;
+            }
+        } else {
+            VirtioGpuMpDeviceExtension->BarsToMapVirtStart[i] = NULL;
+        }
+    }
+
+    PVIRTIOGPUMP_PCI_CAP_HEADER TempCapHeader = &VirtioGpuMpDeviceExtension->RegistersBarCap;
+    VirtioGpuMpDeviceExtension->VirtRegistersStart = (PVOID)((ULONG_PTR)VirtioGpuMpDeviceExtension->BarsToMapVirtStart[TempCapHeader->Index-1] + TempCapHeader->Offset);
+    TempCapHeader = &VirtioGpuMpDeviceExtension->NotifyBarCap;
+    VirtioGpuMpDeviceExtension->VirtNotifyStart = (PVOID)((ULONG_PTR)VirtioGpuMpDeviceExtension->BarsToMapVirtStart[TempCapHeader->Index-1] + TempCapHeader->Offset);
+    TempCapHeader = &VirtioGpuMpDeviceExtension->IsrBarCap;
+    VirtioGpuMpDeviceExtension->VirtIsrStart = (PVOID)((ULONG_PTR)VirtioGpuMpDeviceExtension->BarsToMapVirtStart[TempCapHeader->Index-1] + TempCapHeader->Offset);
+    TempCapHeader = &VirtioGpuMpDeviceExtension->ConfigBarCap;
+    VirtioGpuMpDeviceExtension->VirtConfigStart = (PVOID)((ULONG_PTR)VirtioGpuMpDeviceExtension->BarsToMapVirtStart[TempCapHeader->Index-1] + TempCapHeader->Offset);
+
+    //ERR_ to be replace with info to see it better
+    ERR_(IHVVIDEO, "Register mapped to 0x%x\n",
+        VirtioGpuMpDeviceExtension->VirtRegistersStart);
+
+    //Lets init the driver communication with VirtioGPU here
+
+    VirtioGpuMpDeviceExtension->Registers = (PVIRTIOGPUMP_REGISTERS)VirtioGpuMpDeviceExtension->VirtRegistersStart;
+    VirtioGpuMpDeviceExtension->Notify = (volatile PVOID)VirtioGpuMpDeviceExtension->VirtNotifyStart;
+    VirtioGpuMpDeviceExtension->DeviceConfig = (volatile PVIRTIOGPUMP_CONFIG)VirtioGpuMpDeviceExtension->VirtConfigStart;
+
+    VirtioGpuMpDeviceExtension->Registers->deviceStatus = 0;
+    while(VirtioGpuMpDeviceExtension->Registers->deviceStatus != 0);
+
+    VirtioGpuMpDeviceExtension->Registers->deviceStatus |= VIRTIO_DEVICE_ACKNOWLEDGED;
+    VirtioGpuMpDeviceExtension->Registers->deviceStatus |= VIRTIO_DRIVER_LOADED;
+
+    VirtioGpuMpDeviceExtension->Registers->deviceFeaturesSel = 0x00;
+    ULONG deviceFeaturesLow = VirtioGpuMpDeviceExtension->Registers->deviceFeatures;
+    VirtioGpuMpDeviceExtension->Registers->deviceFeaturesSel = 0x00;
+    ULONG deviceFeaturesHigh = VirtioGpuMpDeviceExtension->Registers->deviceFeatures;
+
+    ERR_(IHVVIDEO, "Virtio GPU supports Features High: 0x%x, Low: 0x%x\n",
+        deviceFeaturesHigh, deviceFeaturesLow);
+
+    VirtioGpuMpDeviceExtension->Registers->guestFeaturesSel = 0x00;
+    VirtioGpuMpDeviceExtension->Registers->guestFeatures = 0x1;
+    VirtioGpuMpDeviceExtension->Registers->guestFeaturesSel = 0x01;
+    VirtioGpuMpDeviceExtension->Registers->guestFeatures = 0x1;
+
+    VirtioGpuMpDeviceExtension->Registers->deviceStatus |= VIRTIO_FEATURES_OK;
+
+    //TODO: Look at this better
+    if(!(VirtioGpuMpDeviceExtension->Registers->deviceStatus & VIRTIO_FEATURES_OK)) return FALSE;
+
+    VirtioGpuMpDeviceExtension->Registers->deviceStatus |= VIRTIO_DRIVER_READY;
+
+    //TODO: Allocate virtual queues here
+    VirtioGpuMpDeviceExtension->VirtualQueues =
+        (PVIRTIOGPUMP_QUEUE_VIRTQUEUE)VideoPortAllocatePool(HwDeviceExtension, VpNonPagedPool,
+            sizeof(VIRTIOGPUMP_QUEUE_VIRTQUEUE) * VirtioGpuMpDeviceExtension->Registers->numQueues, VGPU_TAG);
+    VirtioGpuMpDeviceExtension->ActiveQueues = 0;
+
+    VirtioGpuMpSetupQueue(VirtioGpuMpDeviceExtension, 0);
+    VirtioGpuMpSetupQueue(VirtioGpuMpDeviceExtension, 1);
+
+    return TRUE;
+}
+
+/*
+ * VirtioGpuMpStartIO
+ *
+ * Processes the specified Video Request Packet.
+ */
+
+BOOLEAN
+NTAPI
+VirtioGpuMpStartIO(
+    PVOID HwDeviceExtension,
+    PVIDEO_REQUEST_PACKET RequestPacket)
+{
+    UNIMPLEMENTED;
+    RequestPacket->StatusBlock->Status = ERROR_INVALID_PARAMETER;
+
+    ERR_(IHVVIDEO, "StartIO: Request(0x%X)\n",
+        RequestPacket->IoControlCode);
+
+    {
+        PVIRTIOGPUMP_CONTROL_HEADER Header = (PVIRTIOGPUMP_CONTROL_HEADER)VideoPortAllocatePool(HwDeviceExtension, VpNonPagedPoolCacheAligned,
+            sizeof(VIRTIOGPUMP_CONTROL_HEADER), VGPU_TAG);
+        Header->Type = VIRTIO_GPU_CMD_GET_DISPLAY_INFO;
+
+        PVIRTIOGPUMP_DISPLAY_INFO Info = NULL;
+        VirtioGpuMpSendCommandResponse((PVIRTIOGPUMP_DEVICE_EXTENSION)HwDeviceExtension, (PVOID)Header, sizeof(VIRTIOGPUMP_CONTROL_HEADER), (PVOID *)&Info, sizeof(PVIRTIOGPUMP_DISPLAY_INFO));
+
+        for(INT i = 0; i< 16; i++)
+        {
+            ERR_(IHVVIDEO, "%d: x %d, y %d, w %d, h %d, flags 0x%x\n",
+                i, Info->Modes[i].Rect.X, Info->Modes[i].Rect.Y,
+                Info->Modes[i].Rect.Width, Info->Modes[i].Rect.Height, Info->Modes[i].Flags);
+        }
+    }
+
+    return FALSE;
+}
+
+/*
+ * VirtioGpuMpResetHw
+ *
+ * This function is called to reset the hardware to a known state.
+ */
+
+BOOLEAN
+NTAPI
+VirtioGpuMpResetHw(
+    PVOID DeviceExtension,
+    ULONG Columns,
+    ULONG Rows)
+{
+    UNIMPLEMENTED;
+
+    return TRUE;
+}
+
+/*
+ * XboxVmpGetPowerState
+ *
+ * Queries whether the device can support the requested power state.
+ */
+
+VP_STATUS
+NTAPI
+VirtioGpuMpGetPowerState(
+    PVOID HwDeviceExtension,
+    ULONG HwId,
+    PVIDEO_POWER_MANAGEMENT VideoPowerControl)
+{
+    UNIMPLEMENTED;
+
+    return ERROR_INVALID_FUNCTION;
+}
+
+/*
+ * VirtioGpuMpSetPowerState
+ *
+ * Sets the power state of the specified device
+ */
+
+VP_STATUS
+NTAPI
+VirtioGpuMpSetPowerState(
+    PVOID HwDeviceExtension,
+    ULONG HwId,
+    PVIDEO_POWER_MANAGEMENT VideoPowerControl)
+{
+    UNIMPLEMENTED;
+
+    return ERROR_INVALID_FUNCTION;
+}
+
+BOOLEAN
+NTAPI
+VirtioGpuMpInterrupt(IN PVOID HwDeviceExtension)
+{
+    DPRINT("Virtio GPU Interrupt\n");
+
+    PVIRTIOGPUMP_DEVICE_EXTENSION VirtioGpuMpDeviceExtension = (PVIRTIOGPUMP_DEVICE_EXTENSION)HwDeviceExtension;
+    ULONG IsrStatus = *VirtioGpuMpDeviceExtension->IsrStatus;
+    if(IsrStatus & 0x1)
+    {
+        for(ULONG q = 0; q < VirtioGpuMpDeviceExtension->Registers->numQueues; q++)
+        {
+            PVIRTIOGPUMP_QUEUE_VIRTQUEUE Queue = &VirtioGpuMpDeviceExtension->VirtualQueues[q];
+            if((VirtioGpuMpDeviceExtension->ActiveQueues & (1 << q)) == 0) continue;
+
+            USHORT CurrentIndex = Queue->Used->Index;
+            for(USHORT i = Queue->LastUsed; i != (CurrentIndex & Queue->QueueMask); i = (i + 1) & Queue->QueueMask)
+            {
+                volatile PVIRTIOGPUMP_QUEUE_USED_ELEMENT UsedElement = (volatile PVIRTIOGPUMP_QUEUE_USED_ELEMENT)&Queue->Used->Rings[i];
+
+                USHORT j = UsedElement->Index;
+                while(TRUE)
+                {
+                    INT Next;
+                    volatile PVIRTIOGPUMP_QUEUE_DESCRIPTOR Descriptor = (volatile PVIRTIOGPUMP_QUEUE_DESCRIPTOR)&Queue->Descriptors[j];
+
+                    if(Descriptor->Flags & VIRTQ_DESC_F_NEXT) Next = Descriptor->Next;
+                    else Next = -1;
+
+                    if(*((volatile PUCHAR)&Queue->DescriptorsEndStatus[j]) == 0)
+                    {
+                        Queue->DescriptorsEndStatus[j] = 1;
+                        if(Next < 0) break;
+
+                        Queue->Descriptors[j].Next = Queue->FreeList;
+                        Queue->FreeList = j;
+                        Queue->FreeCount++;
+
+                        j = Next;
+                        continue;
+                    }
+
+                    Queue->Descriptors[j].Next = Queue->FreeList;
+                    Queue->FreeList = j;
+                    Queue->FreeCount++;
+
+                    if(Next < 0) break;
+                    j = Next;
+                }
+
+                Queue->LastUsed = (Queue->LastUsed + 1) & Queue->QueueMask;
+            }
+        }
+        return TRUE;
+    }
+    else
+    {
+        __asm__ __volatile__ ("" ::: "memory");
+        __atomic_thread_fence(__ATOMIC_SEQ_CST);
+        if(VirtioGpuMpDeviceExtension->DeviceConfig->events_read)
+        {
+            __asm__ __volatile__ ("" ::: "memory");
+            __atomic_thread_fence(__ATOMIC_SEQ_CST);
+            VirtioGpuMpDeviceExtension->DeviceConfig->events_clear = VirtioGpuMpDeviceExtension->DeviceConfig->events_read;
+
+            return TRUE;
+        }
+    }
+    //TODO: Events
+
+    return FALSE;
+}
+
+ULONG
+NTAPI
+DriverEntry(
+    IN PVOID Context1,
+    IN PVOID Context2)
+{
+    VIDEO_HW_INITIALIZATION_DATA InitData;
+
+    VideoPortZeroMemory(&InitData, sizeof(InitData));
+    InitData.AdapterInterfaceType = PCIBus;
+    InitData.HwInitDataSize = sizeof(VIDEO_HW_INITIALIZATION_DATA);
+    InitData.HwFindAdapter = VirtioGpuMpFindAdapter;
+    InitData.HwInitialize = VirtioGpuMpInitialize;
+    InitData.HwStartIO = VirtioGpuMpStartIO;
+    InitData.HwResetHw = VirtioGpuMpResetHw;
+    InitData.HwGetPowerState = VirtioGpuMpGetPowerState;
+    InitData.HwSetPowerState = VirtioGpuMpSetPowerState;
+    InitData.HwInterrupt = VirtioGpuMpInterrupt;
+    InitData.HwDeviceExtensionSize = sizeof(VIRTIOGPUMP_DEVICE_EXTENSION);
+
+    return VideoPortInitialize(Context1, Context2, &InitData, NULL);
+}

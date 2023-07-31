@@ -1,0 +1,5 @@
+#define REACTOS_VERSION_DLL
+#define REACTOS_STR_FILE_DESCRIPTION  "Virtio GPU Miniport Device Driver"
+#define REACTOS_STR_INTERNAL_NAME     "virtiogpump"
+#define REACTOS_STR_ORIGINAL_FILENAME "virtiogpump.sys"
+#include <reactos/version.rc>
