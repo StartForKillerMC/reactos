@@ -310,7 +310,7 @@ VirtioGpuMpSubmitChain(
 {
     volatile PVIRTIOGPUMP_QUEUE_AVAILABLE Available = (volatile PVIRTIOGPUMP_QUEUE_AVAILABLE)Queue->Available;
 
-    ERR_(IHVVIDEO, "Submitting Descriptor %d to available index %d\n", DescriptorIndex, Available->Index);
+    TRACE_(IHVVIDEO, "Submitting Descriptor %d to available index %d\n", DescriptorIndex, Available->Index);
 
     Available->Rings[Available->Index & Queue->QueueMask] = DescriptorIndex;
     __asm__ __volatile__ ("" ::: "memory");
@@ -384,6 +384,7 @@ VirtioGpuMpSendCommandResponse(
 
     PVOID Res = (PVOID)VideoPortAllocatePool((PVOID)VirtioGpuMpDeviceExtension, VpNonPagedPoolCacheAligned,
             ResponseLength, VGPU_TAG);
+    VideoPortZeroMemory(Res, ResponseLength);
     *Response = Res;
 
     Descriptor->Address = MmGetPhysicalAddress(Res).QuadPart;
@@ -449,6 +450,7 @@ VirtioGpuMpInitialize(IN PVOID HwDeviceExtension)
 
     VirtioGpuMpDeviceExtension->Registers = (PVIRTIOGPUMP_REGISTERS)VirtioGpuMpDeviceExtension->VirtRegistersStart;
     VirtioGpuMpDeviceExtension->Notify = (volatile PVOID)VirtioGpuMpDeviceExtension->VirtNotifyStart;
+    VirtioGpuMpDeviceExtension->IsrStatus = (volatile PULONG)VirtioGpuMpDeviceExtension->VirtIsrStart;
     VirtioGpuMpDeviceExtension->DeviceConfig = (volatile PVIRTIOGPUMP_CONFIG)VirtioGpuMpDeviceExtension->VirtConfigStart;
 
     VirtioGpuMpDeviceExtension->Registers->deviceStatus = 0;
@@ -489,6 +491,122 @@ VirtioGpuMpInitialize(IN PVOID HwDeviceExtension)
     return TRUE;
 }
 
+BOOLEAN
+FASTCALL
+VirtioGpuMpSaveModes(
+    IN PVIRTIOGPUMP_DEVICE_EXTENSION VirtioGpuMpDeviceExtension
+)
+{
+    if(!VirtioGpuMpDeviceExtension->ModesSaved)
+    {
+        PVIRTIOGPUMP_CONTROL_HEADER Header = (PVIRTIOGPUMP_CONTROL_HEADER)VideoPortAllocatePool(
+            (PVOID)VirtioGpuMpDeviceExtension, VpNonPagedPoolCacheAligned,
+            sizeof(VIRTIOGPUMP_CONTROL_HEADER), VGPU_TAG);
+        Header->Type = VIRTIO_GPU_CMD_GET_DISPLAY_INFO;
+
+        PVIRTIOGPUMP_DISPLAY_INFO Info = NULL;
+        if(VirtioGpuMpSendCommandResponse(VirtioGpuMpDeviceExtension,
+            (PVOID)Header, sizeof(VIRTIOGPUMP_CONTROL_HEADER),
+            (PVOID *)&Info, sizeof(VIRTIOGPUMP_DISPLAY_INFO)) == FALSE)
+            return FALSE;
+
+        for(INT i = 0; i< 16; i++)
+        {
+            if(Info->Modes[i].Enabled)
+                VirtioGpuMpDeviceExtension->EnabledModeCount++;
+            VirtioGpuMpDeviceExtension->SavedModes[i] = Info->Modes[i];
+            ERR_(IHVVIDEO, "%d: x %d, y %d, w %d, h %d, flags 0x%x\n",
+                i, Info->Modes[i].Rect.X, Info->Modes[i].Rect.Y,
+                Info->Modes[i].Rect.Width, Info->Modes[i].Rect.Height, Info->Modes[i].Flags);
+        }
+
+        VirtioGpuMpDeviceExtension->ModesSaved = TRUE;
+
+        VideoPortFreePool((PVOID)VirtioGpuMpDeviceExtension, Header);
+        VideoPortFreePool((PVOID)VirtioGpuMpDeviceExtension, Info);
+    }
+
+    return TRUE;
+}
+
+BOOLEAN
+FASTCALL
+VirtioGpuMpQueryNumAvailModes(
+    IN PVIRTIOGPUMP_DEVICE_EXTENSION VirtioGpuMpDeviceExtension,
+    OUT PVIDEO_NUM_MODES Modes,
+    PSTATUS_BLOCK StatusBlock)
+{
+    if(!VirtioGpuMpSaveModes(VirtioGpuMpDeviceExtension))
+        return FALSE;
+
+    //Get available modes
+    Modes->NumModes = VirtioGpuMpDeviceExtension->EnabledModeCount;
+    Modes->ModeInformationLength = sizeof(VIDEO_MODE_INFORMATION);
+    StatusBlock->Information = sizeof(VIDEO_NUM_MODES); //Modes Length
+
+    return TRUE;
+}
+
+BOOLEAN
+FASTCALL
+VirtioGpuMpQueryAvailModes(
+    IN PVIRTIOGPUMP_DEVICE_EXTENSION VirtioGpuMpDeviceExtension,
+    OUT PVIDEO_MODE_INFORMATION Modes,
+    IN ULONG BufferLength,
+    PSTATUS_BLOCK StatusBlock)
+{
+    if(!VirtioGpuMpSaveModes(VirtioGpuMpDeviceExtension))
+        return FALSE;
+
+    if (BufferLength < (sizeof(VIDEO_NUM_MODES) * VirtioGpuMpDeviceExtension->EnabledModeCount))
+    {
+        StatusBlock->Status = ERROR_INSUFFICIENT_BUFFER;
+        return TRUE;
+    }
+
+    INT CurrentModeIdx = 0;
+    for(INT i = 0; i < 16; i++) {
+        if(VirtioGpuMpDeviceExtension->SavedModes[i].Enabled) {
+            PVIDEO_MODE_INFORMATION VideoMode = &Modes[CurrentModeIdx];
+            PVIRTIOGPUMP_MODE CurrentMode = &VirtioGpuMpDeviceExtension->SavedModes[i];
+
+            VideoMode->Length = sizeof(VIDEO_MODE_INFORMATION);
+            VideoMode->ModeIndex = CurrentModeIdx;
+
+            VideoMode->VisScreenWidth = CurrentMode->Rect.Width;
+            VideoMode->VisScreenHeight = CurrentMode->Rect.Height;
+
+            VideoMode->ScreenStride = VideoMode->VisScreenWidth * 4; //Use 32 bits per pixel
+            VideoMode->NumberOfPlanes = 1;
+            VideoMode->BitsPerPlane = 32;
+            VideoMode->Frequency = 60;
+            VideoMode->XMillimeter = 0; /* FIXME */
+            VideoMode->YMillimeter = 0; /* FIXME */
+
+            VideoMode->NumberRedBits = 8;
+            VideoMode->NumberGreenBits = 8;
+            VideoMode->NumberBlueBits = 8;
+            VideoMode->RedMask = 0xFF0000;
+            VideoMode->GreenMask = 0x00FF00;
+            VideoMode->BlueMask = 0x0000FF;
+
+            VideoMode->VideoMemoryBitmapWidth = VideoMode->VisScreenWidth;
+            VideoMode->VideoMemoryBitmapHeight = VideoMode->VisScreenHeight;
+            VideoMode->AttributeFlags = VIDEO_MODE_GRAPHICS | VIDEO_MODE_COLOR |
+                VIDEO_MODE_NO_OFF_SCREEN;
+            VideoMode->DriverSpecificAttributeFlags = 0;
+
+            CurrentModeIdx++;
+        }
+
+        if(CurrentModeIdx >= VirtioGpuMpDeviceExtension->EnabledModeCount) break;
+    }
+
+    StatusBlock->Information = sizeof(VIDEO_MODE_INFORMATION) * VirtioGpuMpDeviceExtension->EnabledModeCount;
+
+    return TRUE;
+}
+
 /*
  * VirtioGpuMpStartIO
  *
@@ -501,29 +619,62 @@ VirtioGpuMpStartIO(
     PVOID HwDeviceExtension,
     PVIDEO_REQUEST_PACKET RequestPacket)
 {
-    UNIMPLEMENTED;
-    RequestPacket->StatusBlock->Status = ERROR_INVALID_PARAMETER;
-
     ERR_(IHVVIDEO, "StartIO: Request(0x%X)\n",
         RequestPacket->IoControlCode);
 
+    BOOLEAN Result;
+    switch(RequestPacket->IoControlCode)
     {
-        PVIRTIOGPUMP_CONTROL_HEADER Header = (PVIRTIOGPUMP_CONTROL_HEADER)VideoPortAllocatePool(HwDeviceExtension, VpNonPagedPoolCacheAligned,
-            sizeof(VIRTIOGPUMP_CONTROL_HEADER), VGPU_TAG);
-        Header->Type = VIRTIO_GPU_CMD_GET_DISPLAY_INFO;
-
-        PVIRTIOGPUMP_DISPLAY_INFO Info = NULL;
-        VirtioGpuMpSendCommandResponse((PVIRTIOGPUMP_DEVICE_EXTENSION)HwDeviceExtension, (PVOID)Header, sizeof(VIRTIOGPUMP_CONTROL_HEADER), (PVOID *)&Info, sizeof(PVIRTIOGPUMP_DISPLAY_INFO));
-
-        for(INT i = 0; i< 16; i++)
+        case IOCTL_VIDEO_QUERY_AVAIL_MODES:
         {
-            ERR_(IHVVIDEO, "%d: x %d, y %d, w %d, h %d, flags 0x%x\n",
-                i, Info->Modes[i].Rect.X, Info->Modes[i].Rect.Y,
-                Info->Modes[i].Rect.Width, Info->Modes[i].Rect.Height, Info->Modes[i].Flags);
+            TRACE_(IHVVIDEO, "VirtioGpuMpStartIO IOCTL_VIDEO_QUERY_NUM_AVAIL_MODES\n");
+
+            if (RequestPacket->OutputBufferLength < sizeof(VIDEO_MODE_INFORMATION))
+            {
+                RequestPacket->StatusBlock->Status = ERROR_INSUFFICIENT_BUFFER;
+                return TRUE;
+            }
+
+            Result = VirtioGpuMpQueryAvailModes(
+                (PVIRTIOGPUMP_DEVICE_EXTENSION)HwDeviceExtension,
+                (PVIDEO_MODE_INFORMATION)RequestPacket->OutputBuffer,
+                RequestPacket->OutputBufferLength,
+                RequestPacket->StatusBlock);
+            break;
+        }
+
+        case IOCTL_VIDEO_QUERY_NUM_AVAIL_MODES:
+        {
+            TRACE_(IHVVIDEO, "VirtioGpuMpStartIO IOCTL_VIDEO_QUERY_NUM_AVAIL_MODES\n");
+
+            if (RequestPacket->OutputBufferLength < sizeof(VIDEO_NUM_MODES))
+            {
+                RequestPacket->StatusBlock->Status = ERROR_INSUFFICIENT_BUFFER;
+                return TRUE;
+            }
+
+            Result = VirtioGpuMpQueryNumAvailModes(
+                (PVIRTIOGPUMP_DEVICE_EXTENSION)HwDeviceExtension,
+                (PVIDEO_NUM_MODES)RequestPacket->OutputBuffer,
+                RequestPacket->StatusBlock);
+            break;
+        }
+
+        default:
+        {
+            ERR_(IHVVIDEO, "VirtioGpuMpStartIO 0x%x not implemented\n", RequestPacket->IoControlCode);
+
+            RequestPacket->StatusBlock->Status = ERROR_INVALID_FUNCTION;
+            return FALSE;
         }
     }
 
-    return FALSE;
+    if (Result)
+    {
+        RequestPacket->StatusBlock->Status = NO_ERROR;
+    }
+
+    return TRUE;
 }
 
 /*
@@ -584,8 +735,6 @@ BOOLEAN
 NTAPI
 VirtioGpuMpInterrupt(IN PVOID HwDeviceExtension)
 {
-    DPRINT("Virtio GPU Interrupt\n");
-
     PVIRTIOGPUMP_DEVICE_EXTENSION VirtioGpuMpDeviceExtension = (PVIRTIOGPUMP_DEVICE_EXTENSION)HwDeviceExtension;
     ULONG IsrStatus = *VirtioGpuMpDeviceExtension->IsrStatus;
     if(IsrStatus & 0x1)

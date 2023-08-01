@@ -115,35 +115,6 @@ typedef struct {
     volatile PUCHAR DescriptorsEndStatus;
 } VIRTIOGPUMP_QUEUE_VIRTQUEUE, *PVIRTIOGPUMP_QUEUE_VIRTQUEUE;
 
-typedef struct
-{
-    PHYSICAL_ADDRESS BarsToMapPhysStart[5];
-    ULONG BarsToMapLength[5];
-    PVOID BarsToMapVirtStart[5];
-
-    VIRTIOGPUMP_PCI_CAP_HEADER RegistersBarCap;
-    PVOID VirtRegistersStart;
-
-    VIRTIOGPUMP_PCI_CAP_HEADER NotifyBarCap;
-    PVOID VirtNotifyStart;
-
-    VIRTIOGPUMP_PCI_CAP_HEADER IsrBarCap;
-    PVOID VirtIsrStart;
-
-    VIRTIOGPUMP_PCI_CAP_HEADER ConfigBarCap;
-    PVOID VirtConfigStart;
-
-    PVIRTIOGPUMP_REGISTERS Registers;
-    volatile PVOID Notify;
-    volatile PULONG IsrStatus;
-    volatile PVIRTIOGPUMP_CONFIG DeviceConfig;
-
-    ULONG NotifyMultiplier;
-
-    PVIRTIOGPUMP_QUEUE_VIRTQUEUE VirtualQueues;
-    ULONG ActiveQueues;
-} VIRTIOGPUMP_DEVICE_EXTENSION, *PVIRTIOGPUMP_DEVICE_EXTENSION;
-
 #pragma pack(push, 1)
 typedef struct {
     ULONG Type;
@@ -224,5 +195,38 @@ enum virtio_gpu_ctrl_type {
         VIRTIO_GPU_RESP_ERR_INVALID_CONTEXT_ID,
         VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER,
 };
+
+typedef struct
+{
+    PHYSICAL_ADDRESS BarsToMapPhysStart[5];
+    ULONG BarsToMapLength[5];
+    PVOID BarsToMapVirtStart[5];
+
+    VIRTIOGPUMP_PCI_CAP_HEADER RegistersBarCap;
+    PVOID VirtRegistersStart;
+
+    VIRTIOGPUMP_PCI_CAP_HEADER NotifyBarCap;
+    PVOID VirtNotifyStart;
+
+    VIRTIOGPUMP_PCI_CAP_HEADER IsrBarCap;
+    PVOID VirtIsrStart;
+
+    VIRTIOGPUMP_PCI_CAP_HEADER ConfigBarCap;
+    PVOID VirtConfigStart;
+
+    PVIRTIOGPUMP_REGISTERS Registers;
+    volatile PVOID Notify;
+    volatile PULONG IsrStatus;
+    volatile PVIRTIOGPUMP_CONFIG DeviceConfig;
+
+    ULONG NotifyMultiplier;
+
+    PVIRTIOGPUMP_QUEUE_VIRTQUEUE VirtualQueues;
+    ULONG ActiveQueues;
+
+    BOOLEAN ModesSaved;
+    VIRTIOGPUMP_MODE SavedModes[16];
+    UINT EnabledModeCount;
+} VIRTIOGPUMP_DEVICE_EXTENSION, *PVIRTIOGPUMP_DEVICE_EXTENSION;
 
 #define VGPU_TAG ((ULONG)'mgvD')
