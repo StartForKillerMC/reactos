@@ -1,5 +1,5 @@
 /*
- * PROJECT:     ReactOS VirtIO Gpu miniport video driver
+ * PROJECT:     ReactOS VirtIO GPU miniport video driver
  * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
  * PURPOSE:     Simple framebuffer driver for Virtio Virgl GPU
  * COPYRIGHT:   Copyright 2023 Jesús Sanz del Rey (jesussanz2003@gmail.com)
@@ -151,6 +151,82 @@ typedef struct {
 } VIRTIOGPUMP_DISPLAY_INFO, *PVIRTIOGPUMP_DISPLAY_INFO;
 #pragma pack(pop)
 
+#pragma pack(push, 1)
+typedef struct {
+    VIRTIOGPUMP_CONTROL_HEADER Header;
+    VIRTIOGPUMP_RECT Rect;
+    ULONG ScanoutID;
+    ULONG ResourceID;
+} VIRTIOGPUMP_SET_SCANOUT, *PVIRTIOGPUMP_SET_SCANOUT;
+#pragma pack(pop)
+
+#pragma pack(push, 1)
+typedef struct {
+    VIRTIOGPUMP_CONTROL_HEADER Header;
+    ULONG ResourceID;
+    ULONG Format;
+    ULONG Width;
+    ULONG Height;
+} VIRTIOGPUMP_RESOURCE_CREATE_2D, *PVIRTIOGPUMP_RESOURCE_CREATE_2D;
+#pragma pack(pop)
+
+#pragma pack(push, 1)
+typedef struct {
+    VIRTIOGPUMP_CONTROL_HEADER Header;
+    ULONG ResourceID;
+    ULONG Padding;
+} VIRTIOGPUMP_RESOURCE_UNREF, *PVIRTIOGPUMP_RESOURCE_UNREF;
+#pragma pack(pop)
+
+#pragma pack(push, 1)
+typedef struct {
+    ULONGLONG Address;
+    ULONG Length;
+    ULONG Padding;
+
+} VIRTIOGPUMP_MEM_ENTRY, *PVIRTIOGPUMP_MEM_ENTRY;
+#pragma pack(pop)
+
+#pragma pack(push, 1)
+typedef struct {
+    VIRTIOGPUMP_CONTROL_HEADER Header;
+    ULONG ResourceID;
+    ULONG EntryCount;
+} VIRTIOGPUMP_RESOURCE_ATTACH_BACKING, *PVIRTIOGPUMP_RESOURCE_ATTACH_BACKING;
+#pragma pack(pop)
+
+#pragma pack(push, 1)
+typedef struct {
+    VIRTIOGPUMP_CONTROL_HEADER Header;
+    VIRTIOGPUMP_RECT Rect;
+    ULONGLONG Offset;
+    ULONG ResourceID;
+    ULONG Padding;
+} VIRTIOGPUMP_TRANSFER_TO_HOST_2D, *PVIRTIOGPUMP_TRANSFER_TO_HOST_2D;
+#pragma pack(pop)
+
+#pragma pack(push, 1)
+typedef struct {
+    VIRTIOGPUMP_CONTROL_HEADER Header;
+    VIRTIOGPUMP_RECT Rect;
+    ULONG ResourceID;
+    ULONG Padding;
+} VIRTIOGPUMP_RESOURCE_FLUSH, *PVIRTIOGPUMP_RESOURCE_FLUSH;
+#pragma pack(pop)
+
+enum virtio_gpu_formats {
+    VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM  = 1,
+    VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM  = 2,
+    VIRTIO_GPU_FORMAT_A8R8G8B8_UNORM  = 3,
+    VIRTIO_GPU_FORMAT_X8R8G8B8_UNORM  = 4,
+
+    VIRTIO_GPU_FORMAT_R8G8B8A8_UNORM  = 67,
+    VIRTIO_GPU_FORMAT_X8B8G8R8_UNORM  = 68,
+
+    VIRTIO_GPU_FORMAT_A8B8G8R8_UNORM  = 121,
+    VIRTIO_GPU_FORMAT_R8G8B8X8_UNORM  = 134,
+};
+
 enum virtio_gpu_ctrl_type {
         /* 2d commands */
         VIRTIO_GPU_CMD_GET_DISPLAY_INFO = 0x0100,
@@ -224,9 +300,37 @@ typedef struct
     PVIRTIOGPUMP_QUEUE_VIRTQUEUE VirtualQueues;
     ULONG ActiveQueues;
 
+    PHYSICAL_ADDRESS PhysFramebuffer;
+    ULONG PhysFramebufferLength;
+
+    PVP_DMA_ADAPTER DmaAdapater;
+
+    ULONG ResourceCurrentAllocatorIdx;
+
     BOOLEAN ModesSaved;
     VIRTIOGPUMP_MODE SavedModes[16];
     UINT EnabledModeCount;
+    UINT CurrentMode;
+
+    KTIMER FlushTimer;
+    KDPC FlushDpc;
+    PSPIN_LOCK  Lock;
+
+    PVOID Framebuffer;
+    ULONG ScanoutResourceID;
 } VIRTIOGPUMP_DEVICE_EXTENSION, *PVIRTIOGPUMP_DEVICE_EXTENSION;
 
 #define VGPU_TAG ((ULONG)'mgvD')
+
+typedef struct _VIDEO_CREATE_2D_RESOURCE {
+  ULONG Width;
+  ULONG Height;
+  ULONG Format;
+} VIDEO_CREATE_2D_RESOURCE, *PVIDEO_CREATE_2D_RESOURCE;
+
+typedef struct _VIDEO_CREATE_2D_RESOURCE {
+  ULONG ResourceID;
+} VIDEO_RESOURCE_ID, *PVIDEO_RESOURCE_ID;
+
+#define IOCTL_VIDEO_CREATE_2D_RESOURCE \
+  CTL_CODE(FILE_DEVICE_VIDEO, 0x800, METHOD_BUFFERED, FILE_ANY_ACCESS)

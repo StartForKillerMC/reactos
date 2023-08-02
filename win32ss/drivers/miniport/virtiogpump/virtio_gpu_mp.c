@@ -1,3 +1,10 @@
+/*
+ * PROJECT:     ReactOS VirtIO GPU miniport video driver
+ * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
+ * PURPOSE:     Simple framebuffer driver for Virtio Virgl GPU
+ * COPYRIGHT:   Copyright 2023 Jesús Sanz del Rey (jesussanz2003@gmail.com)
+ */
+
 #include "virtio_gpu_mp.h"
 
 #include <debug.h>
@@ -163,6 +170,9 @@ VirtioGpuMpFindAdapter(
                 VirtioGpuMpDeviceExtension->BarsToMapLength[i] = 0;
             }
         }
+
+        VirtioGpuMpDeviceExtension->PhysFramebuffer = AccessRanges[0].RangeStart;
+        VirtioGpuMpDeviceExtension->PhysFramebufferLength = AccessRanges[0].RangeLength;
     }
 
     ERR_(IHVVIDEO, "Inited Status: %d, ridx(%d:%d), nidx(%d:%d), iidx(%d:%d), cidx(%d:%d)\n", Status,
@@ -397,6 +407,51 @@ VirtioGpuMpSendCommandResponse(
     return TRUE;
 }
 
+BOOLEAN
+FASTCALL
+VirtioGpuMpSaveModes(
+    IN PVIRTIOGPUMP_DEVICE_EXTENSION VirtioGpuMpDeviceExtension
+)
+{
+    if(!VirtioGpuMpDeviceExtension->ModesSaved)
+    {
+        PVIRTIOGPUMP_CONTROL_HEADER Header = (PVIRTIOGPUMP_CONTROL_HEADER)VideoPortAllocatePool(
+            (PVOID)VirtioGpuMpDeviceExtension, VpNonPagedPoolCacheAligned,
+            sizeof(VIRTIOGPUMP_CONTROL_HEADER), VGPU_TAG);
+        Header->Type = VIRTIO_GPU_CMD_GET_DISPLAY_INFO;
+
+        PVIRTIOGPUMP_DISPLAY_INFO Info = NULL;
+        if(VirtioGpuMpSendCommandResponse(VirtioGpuMpDeviceExtension,
+            (PVOID)Header, sizeof(VIRTIOGPUMP_CONTROL_HEADER),
+            (PVOID *)&Info, sizeof(VIRTIOGPUMP_DISPLAY_INFO)) == FALSE)
+            return FALSE;
+
+        for(INT i = 0; i< 16; i++)
+        {
+            if(Info->Modes[i].Enabled)
+                VirtioGpuMpDeviceExtension->EnabledModeCount++;
+            VirtioGpuMpDeviceExtension->SavedModes[i] = Info->Modes[i];
+            ERR_(IHVVIDEO, "%d: x %d, y %d, w %d, h %d, flags 0x%x\n",
+                i, Info->Modes[i].Rect.X, Info->Modes[i].Rect.Y,
+                Info->Modes[i].Rect.Width, Info->Modes[i].Rect.Height, Info->Modes[i].Flags);
+        }
+
+        VirtioGpuMpDeviceExtension->ModesSaved = TRUE;
+
+        VideoPortFreePool((PVOID)VirtioGpuMpDeviceExtension, Header);
+        VideoPortFreePool((PVOID)VirtioGpuMpDeviceExtension, Info);
+    }
+
+    return TRUE;
+}
+
+VOID
+NTAPI
+FlushDpcRoutine(IN PKDPC Dpc,
+                IN PVOID DeferredContext,
+                IN PVOID SystemArgument1,
+                IN PVOID SystemArgument2);
+
 /*
  * VirtioGpuMpInitialize
  *
@@ -416,7 +471,7 @@ VirtioGpuMpInitialize(IN PVOID HwDeviceExtension)
 
     VirtioGpuMpDeviceExtension = (PVIRTIOGPUMP_DEVICE_EXTENSION)HwDeviceExtension;
 
-    for(INT i = 0; i < 5; i++) {
+    for(INT i = 1; i < 5; i++) {
         if(VirtioGpuMpDeviceExtension->BarsToMapLength[i] != 0)
         {
             if(VideoPortMapMemory(HwDeviceExtension,
@@ -488,43 +543,30 @@ VirtioGpuMpInitialize(IN PVOID HwDeviceExtension)
     VirtioGpuMpSetupQueue(VirtioGpuMpDeviceExtension, 0);
     VirtioGpuMpSetupQueue(VirtioGpuMpDeviceExtension, 1);
 
-    return TRUE;
-}
+    KeInitializeTimer(&VirtioGpuMpDeviceExtension->FlushTimer);
+    KeInitializeDpc(&VirtioGpuMpDeviceExtension->FlushDpc, FlushDpcRoutine, (PVOID)VirtioGpuMpDeviceExtension);
+    VideoPortCreateSpinLock((PVOID)VirtioGpuMpDeviceExtension, &VirtioGpuMpDeviceExtension->Lock);
 
-BOOLEAN
-FASTCALL
-VirtioGpuMpSaveModes(
-    IN PVIRTIOGPUMP_DEVICE_EXTENSION VirtioGpuMpDeviceExtension
-)
-{
-    if(!VirtioGpuMpDeviceExtension->ModesSaved)
+    VirtioGpuMpDeviceExtension->ResourceCurrentAllocatorIdx = 1;
+
+    //Allocate the framebuffer, get it bigger enought to be able to fix all scanouts possible
+    if(!VirtioGpuMpSaveModes(VirtioGpuMpDeviceExtension))
+        return FALSE;
+
+    ULONG MaxSize = 0;
+    for(INT i = 0; i < 16; i++)
     {
-        PVIRTIOGPUMP_CONTROL_HEADER Header = (PVIRTIOGPUMP_CONTROL_HEADER)VideoPortAllocatePool(
-            (PVOID)VirtioGpuMpDeviceExtension, VpNonPagedPoolCacheAligned,
-            sizeof(VIRTIOGPUMP_CONTROL_HEADER), VGPU_TAG);
-        Header->Type = VIRTIO_GPU_CMD_GET_DISPLAY_INFO;
-
-        PVIRTIOGPUMP_DISPLAY_INFO Info = NULL;
-        if(VirtioGpuMpSendCommandResponse(VirtioGpuMpDeviceExtension,
-            (PVOID)Header, sizeof(VIRTIOGPUMP_CONTROL_HEADER),
-            (PVOID *)&Info, sizeof(VIRTIOGPUMP_DISPLAY_INFO)) == FALSE)
-            return FALSE;
-
-        for(INT i = 0; i< 16; i++)
+        PVIRTIOGPUMP_MODE CurrentMode = &VirtioGpuMpDeviceExtension->SavedModes[i];
+        if(CurrentMode->Enabled)
         {
-            if(Info->Modes[i].Enabled)
-                VirtioGpuMpDeviceExtension->EnabledModeCount++;
-            VirtioGpuMpDeviceExtension->SavedModes[i] = Info->Modes[i];
-            ERR_(IHVVIDEO, "%d: x %d, y %d, w %d, h %d, flags 0x%x\n",
-                i, Info->Modes[i].Rect.X, Info->Modes[i].Rect.Y,
-                Info->Modes[i].Rect.Width, Info->Modes[i].Rect.Height, Info->Modes[i].Flags);
+            ULONG CurrentSize = CurrentMode->Rect.Width * CurrentMode->Rect.Height * 4; //Each pixel is four byte size
+            if(CurrentSize > MaxSize) MaxSize = CurrentSize;
         }
-
-        VirtioGpuMpDeviceExtension->ModesSaved = TRUE;
-
-        VideoPortFreePool((PVOID)VirtioGpuMpDeviceExtension, Header);
-        VideoPortFreePool((PVOID)VirtioGpuMpDeviceExtension, Info);
     }
+
+    LARGE_INTEGER DueTime;
+    DueTime.QuadPart = -4000;
+    KeSetTimerEx(&VirtioGpuMpDeviceExtension->FlushTimer, DueTime, 16, &VirtioGpuMpDeviceExtension->FlushDpc);
 
     return TRUE;
 }
@@ -607,6 +649,234 @@ VirtioGpuMpQueryAvailModes(
     return TRUE;
 }
 
+BOOLEAN
+FASTCALL
+VirtioGpuMpSetCurrentMode(
+    IN PVIRTIOGPUMP_DEVICE_EXTENSION VirtioGpuMpDeviceExtension,
+    IN PVIDEO_MODE Mode,
+    PSTATUS_BLOCK StatusBlock)
+{
+    if(!VirtioGpuMpSaveModes(VirtioGpuMpDeviceExtension))
+        return FALSE;
+
+    //Zero out upper 2 bits
+    ULONG RequestMode = Mode->RequestedMode & ~(((ULONG)(LONG)-1 >> 1) & ((ULONG)(LONG)-1));
+    if(RequestMode >= 16)
+        return FALSE;
+
+    PVIRTIOGPUMP_MODE RequestModePointer = &VirtioGpuMpDeviceExtension->SavedModes[RequestMode];
+
+    if(VirtioGpuMpDeviceExtension->ScanoutResourceID != 0)
+    {
+        PVIRTIOGPUMP_RESOURCE_UNREF Request = (PVIRTIOGPUMP_RESOURCE_UNREF)VideoPortAllocatePool(
+            (PVOID)VirtioGpuMpDeviceExtension, VpNonPagedPoolCacheAligned,
+            sizeof(VIRTIOGPUMP_RESOURCE_UNREF), VGPU_TAG);
+
+        Request->Header.Type = VIRTIO_GPU_CMD_RESOURCE_UNREF;
+        Request->ResourceID = VirtioGpuMpDeviceExtension-> ScanoutResourceID;
+
+        PVIRTIOGPUMP_CONTROL_HEADER Res = NULL;
+        if(VirtioGpuMpSendCommandResponse(VirtioGpuMpDeviceExtension,
+            (PVOID)Request, sizeof(VIRTIOGPUMP_RESOURCE_UNREF),
+            (PVOID *)&Res, sizeof(VIRTIOGPUMP_CONTROL_HEADER)) == FALSE)
+            return FALSE;
+
+        VideoPortFreePool((PVOID)VirtioGpuMpDeviceExtension, Request);
+        VideoPortFreePool((PVOID)VirtioGpuMpDeviceExtension, Res);
+    }
+    else
+        VirtioGpuMpDeviceExtension-> ScanoutResourceID = VirtioGpuMpDeviceExtension->ResourceCurrentAllocatorIdx++;
+
+    //Create new scanout resource
+    {
+        PVIRTIOGPUMP_RESOURCE_CREATE_2D Request = (PVIRTIOGPUMP_RESOURCE_CREATE_2D)VideoPortAllocatePool(
+            (PVOID)VirtioGpuMpDeviceExtension, VpNonPagedPoolCacheAligned,
+            sizeof(VIRTIOGPUMP_RESOURCE_CREATE_2D), VGPU_TAG);
+
+        Request->Header.Type = VIRTIO_GPU_CMD_RESOURCE_CREATE_2D;
+        Request->ResourceID = VirtioGpuMpDeviceExtension-> ScanoutResourceID;
+        Request->Format = VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM;
+        Request->Width = RequestModePointer->Rect.Width;
+        Request->Height = RequestModePointer->Rect.Height;
+
+        PVIRTIOGPUMP_CONTROL_HEADER Res = NULL;
+        if(VirtioGpuMpSendCommandResponse(VirtioGpuMpDeviceExtension,
+            (PVOID)Request, sizeof(VIRTIOGPUMP_RESOURCE_CREATE_2D),
+            (PVOID *)&Res, sizeof(VIRTIOGPUMP_CONTROL_HEADER)) == FALSE)
+            return FALSE;
+
+        VideoPortFreePool((PVOID)VirtioGpuMpDeviceExtension, Request);
+        VideoPortFreePool((PVOID)VirtioGpuMpDeviceExtension, Res);
+    }
+
+    //Attach the framebuffer
+    {
+        PVIRTIOGPUMP_RESOURCE_ATTACH_BACKING Request = (PVIRTIOGPUMP_RESOURCE_ATTACH_BACKING)VideoPortAllocatePool(
+            (PVOID)VirtioGpuMpDeviceExtension, VpNonPagedPoolCacheAligned,
+            sizeof(VIRTIOGPUMP_RESOURCE_ATTACH_BACKING) + sizeof(VIRTIOGPUMP_MEM_ENTRY), VGPU_TAG);
+        PVIRTIOGPUMP_MEM_ENTRY Entries = (PVIRTIOGPUMP_MEM_ENTRY)((ULONG_PTR)Request + sizeof(VIRTIOGPUMP_RESOURCE_ATTACH_BACKING));
+
+        Request->Header.Type = VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING;
+        Request->ResourceID = VirtioGpuMpDeviceExtension->ScanoutResourceID;
+        Request->EntryCount = 1;
+        Entries[0].Address = VirtioGpuMpDeviceExtension->PhysFramebuffer.QuadPart;
+        Entries[0].Length = RequestModePointer->Rect.Width * RequestModePointer->Rect.Height * 4;
+
+        PVIRTIOGPUMP_CONTROL_HEADER Res = NULL;
+        if(VirtioGpuMpSendCommandResponse(VirtioGpuMpDeviceExtension,
+            (PVOID)Request, sizeof(VIRTIOGPUMP_RESOURCE_ATTACH_BACKING) + sizeof(VIRTIOGPUMP_MEM_ENTRY),
+            (PVOID *)&Res, sizeof(VIRTIOGPUMP_CONTROL_HEADER)) == FALSE)
+            return FALSE;
+
+        VideoPortFreePool((PVOID)VirtioGpuMpDeviceExtension, Request);
+        VideoPortFreePool((PVOID)VirtioGpuMpDeviceExtension, Res);
+    }
+
+    PVIRTIOGPUMP_SET_SCANOUT Request = (PVIRTIOGPUMP_SET_SCANOUT)VideoPortAllocatePool(
+        (PVOID)VirtioGpuMpDeviceExtension, VpNonPagedPoolCacheAligned,
+        sizeof(VIRTIOGPUMP_SET_SCANOUT), VGPU_TAG);
+    Request->Header.Type = VIRTIO_GPU_CMD_SET_SCANOUT;
+    Request->Rect.X = Request->Rect.Y = 0;
+    Request->Rect.Width = RequestModePointer->Rect.Width;
+    Request->Rect.Height = RequestModePointer->Rect.Height;
+    Request->ResourceID = VirtioGpuMpDeviceExtension->ScanoutResourceID;
+    Request->ScanoutID = RequestMode;
+
+    PVIRTIOGPUMP_CONTROL_HEADER Res = NULL;
+    if(VirtioGpuMpSendCommandResponse(VirtioGpuMpDeviceExtension,
+        (PVOID)Request, sizeof(VIRTIOGPUMP_SET_SCANOUT),
+        (PVOID *)&Res, sizeof(VIRTIOGPUMP_CONTROL_HEADER)) == FALSE)
+        return FALSE;
+
+    VirtioGpuMpDeviceExtension->CurrentMode = RequestMode;
+
+    VideoPortFreePool((PVOID)VirtioGpuMpDeviceExtension, Request);
+    VideoPortFreePool((PVOID)VirtioGpuMpDeviceExtension, Res);
+
+    StatusBlock->Information = sizeof(PVIDEO_MODE); //Modes Length
+
+    return TRUE;
+}
+
+BOOLEAN
+FASTCALL
+VirtioGpuMpMapVideoMemory(
+    IN PVIRTIOGPUMP_DEVICE_EXTENSION VirtioGpuMpDeviceExtension,
+    IN PVIDEO_MEMORY VideoMemory,
+    OUT PVIDEO_MEMORY_INFORMATION VideoMemoryInfo,
+    PSTATUS_BLOCK StatusBlock)
+{
+    PVIRTIOGPUMP_MODE CurrentMode =
+        &VirtioGpuMpDeviceExtension->SavedModes[VirtioGpuMpDeviceExtension->CurrentMode];
+
+    VideoMemoryInfo->VideoRamBase = VideoMemory->RequestedVirtualAddress;
+    VideoMemoryInfo->VideoRamLength = CurrentMode->Rect.Width * CurrentMode->Rect.Height * 4;
+
+    VP_STATUS Status;
+    ULONG InIoSpace = VIDEO_MEMORY_SPACE_MEMORY;
+    if((Status = VideoPortMapMemory((PVOID)VirtioGpuMpDeviceExtension,
+                    VirtioGpuMpDeviceExtension->PhysFramebuffer,
+                    &VirtioGpuMpDeviceExtension->PhysFramebufferLength,
+                    &InIoSpace,
+                    &VideoMemoryInfo->VideoRamBase)) != NO_ERROR)
+    {
+        ERR_(IHVVIDEO, "Failed to map video memory\n");
+        StatusBlock->Status = Status;
+        return FALSE;
+    }
+
+    VideoMemoryInfo->FrameBufferBase = VideoMemoryInfo->VideoRamBase;
+    VideoMemoryInfo->FrameBufferLength = VideoMemoryInfo->VideoRamLength;
+
+    StatusBlock->Information = sizeof(VIDEO_MEMORY_INFORMATION);
+
+    return TRUE;
+}
+
+BOOLEAN
+FASTCALL
+VirtioGpuMpUnmapVideoMemory(
+    IN PVIRTIOGPUMP_DEVICE_EXTENSION VirtioGpuMpDeviceExtension,
+    IN PVIDEO_MEMORY VideoMemory,
+    PSTATUS_BLOCK StatusBlock)
+{
+    VP_STATUS Status;
+    if((Status = VideoPortUnmapMemory((PVOID)VirtioGpuMpDeviceExtension,
+                    VideoMemory->RequestedVirtualAddress, NULL)) != NO_ERROR)
+    {
+        ERR_(IHVVIDEO, "Failed to map video memory\n");
+        StatusBlock->Status = Status;
+        return FALSE;
+    }
+
+    StatusBlock->Information = sizeof(PVIDEO_MEMORY);
+
+    return TRUE;
+}
+
+BOOLEAN
+FASTCALL
+VirtioGpuMpReset(
+    IN PVIRTIOGPUMP_DEVICE_EXTENSION VirtioGpuMpDeviceExtension,
+    PSTATUS_BLOCK StatusBlock)
+{
+    //TODO: Research
+
+    return TRUE;
+}
+
+VOID
+VirtioGpuMpCancelFlushTimer(
+    IN PVIRTIOGPUMP_DEVICE_EXTENSION VirtioGpuMpDeviceExtension
+)
+{
+    KeCancelTimer(&VirtioGpuMpDeviceExtension->FlushTimer);
+}
+
+VOID
+VirtioGpuMpStartFlushTimer(
+    IN PVIRTIOGPUMP_DEVICE_EXTENSION VirtioGpuMpDeviceExtension
+)
+{
+    LARGE_INTEGER DueTime;
+    DueTime.QuadPart = -4000;
+    KeSetTimerEx(&VirtioGpuMpDeviceExtension->FlushTimer, DueTime, 16, &VirtioGpuMpDeviceExtension->FlushDpc);
+}
+
+BOOLEAN
+FASTCALL
+VirtioGpuMpSetCurrentMode(
+    IN PVIRTIOGPUMP_DEVICE_EXTENSION VirtioGpuMpDeviceExtension,
+    IN PVIDEO_CREATE_2D_RESOURCE CreateResource,
+    OUT PVIDEO_RESOURCE_ID ResourceIDBuffer,
+    PSTATUS_BLOCK StatusBlock)
+{
+    PVIRTIOGPUMP_RESOURCE_CREATE_2D Request = (PVIRTIOGPUMP_RESOURCE_CREATE_2D)VideoPortAllocatePool(
+        (PVOID)VirtioGpuMpDeviceExtension, VpNonPagedPoolCacheAligned,
+        sizeof(VIRTIOGPUMP_RESOURCE_CREATE_2D), VGPU_TAG);
+
+    Request->Header.Type = VIRTIO_GPU_CMD_RESOURCE_CREATE_2D;
+    Request->ResourceID = VirtioGpuMpDeviceExtension->ResourceCurrentAllocatorIdx++;
+    Request->Format = CreateResource->Format;
+    Request->Width = CreateResource->Width;
+    Request->Height = CreateResource->Height;
+
+    ResourceIDBuffer->ResourceID = Request->ResourceID;
+
+    PVIRTIOGPUMP_CONTROL_HEADER Res = NULL;
+    if(VirtioGpuMpSendCommandResponse(VirtioGpuMpDeviceExtension,
+        (PVOID)Request, sizeof(VIRTIOGPUMP_RESOURCE_CREATE_2D),
+        (PVOID *)&Res, sizeof(VIRTIOGPUMP_CONTROL_HEADER)) == FALSE)
+        return FALSE;
+
+    VideoPortFreePool((PVOID)VirtioGpuMpDeviceExtension, Request);
+    VideoPortFreePool((PVOID)VirtioGpuMpDeviceExtension, Res);
+
+    StatusBlock->Information = sizeof(PVIDEO_CREATE_2D_RESOURCE); //Modes Length
+
+    return TRUE;
+}
+
 /*
  * VirtioGpuMpStartIO
  *
@@ -622,12 +892,14 @@ VirtioGpuMpStartIO(
     ERR_(IHVVIDEO, "StartIO: Request(0x%X)\n",
         RequestPacket->IoControlCode);
 
+    PVIRTIOGPUMP_DEVICE_EXTENSION VirtioGpuMpDeviceExtension = (PVIRTIOGPUMP_DEVICE_EXTENSION)HwDeviceExtension;
+
     BOOLEAN Result;
     switch(RequestPacket->IoControlCode)
     {
         case IOCTL_VIDEO_QUERY_AVAIL_MODES:
         {
-            TRACE_(IHVVIDEO, "VirtioGpuMpStartIO IOCTL_VIDEO_QUERY_NUM_AVAIL_MODES\n");
+            TRACE_(IHVVIDEO, "VirtioGpuMpStartIO IOCTL_VIDEO_QUERY_AVAIL_MODES\n");
 
             if (RequestPacket->OutputBufferLength < sizeof(VIDEO_MODE_INFORMATION))
             {
@@ -635,8 +907,9 @@ VirtioGpuMpStartIO(
                 return TRUE;
             }
 
+            VirtioGpuMpCancelFlushTimer(VirtioGpuMpDeviceExtension);
             Result = VirtioGpuMpQueryAvailModes(
-                (PVIRTIOGPUMP_DEVICE_EXTENSION)HwDeviceExtension,
+                VirtioGpuMpDeviceExtension,
                 (PVIDEO_MODE_INFORMATION)RequestPacket->OutputBuffer,
                 RequestPacket->OutputBufferLength,
                 RequestPacket->StatusBlock);
@@ -653,9 +926,105 @@ VirtioGpuMpStartIO(
                 return TRUE;
             }
 
+            VirtioGpuMpCancelFlushTimer(VirtioGpuMpDeviceExtension);
             Result = VirtioGpuMpQueryNumAvailModes(
-                (PVIRTIOGPUMP_DEVICE_EXTENSION)HwDeviceExtension,
+                VirtioGpuMpDeviceExtension,
                 (PVIDEO_NUM_MODES)RequestPacket->OutputBuffer,
+                RequestPacket->StatusBlock);
+            break;
+        }
+
+        case IOCTL_VIDEO_SET_CURRENT_MODE:
+        {
+            TRACE_(IHVVIDEO, "VirtioGpuMpStartIO IOCTL_VIDEO_SET_CURRENT_MODE\n");
+
+            if (RequestPacket->InputBufferLength < sizeof(VIDEO_MODE))
+            {
+                RequestPacket->StatusBlock->Status = ERROR_INSUFFICIENT_BUFFER;
+                return TRUE;
+            }
+
+            VirtioGpuMpCancelFlushTimer(VirtioGpuMpDeviceExtension);
+            Result = VirtioGpuMpSetCurrentMode(
+                VirtioGpuMpDeviceExtension,
+                (PVIDEO_MODE)RequestPacket->InputBuffer,
+                RequestPacket->StatusBlock);
+            break;
+        }
+
+        case IOCTL_VIDEO_MAP_VIDEO_MEMORY:
+        {
+            TRACE_(IHVVIDEO, "VirtioGpuMpStartIO IOCTL_VIDEO_MAP_VIDEO_MEMORY\n");
+
+            if (RequestPacket->InputBufferLength < sizeof(VIDEO_MEMORY))
+            {
+                RequestPacket->StatusBlock->Status = ERROR_INSUFFICIENT_BUFFER;
+                return TRUE;
+            }
+            if (RequestPacket->OutputBufferLength < sizeof(VIDEO_MEMORY_INFORMATION))
+            {
+                RequestPacket->StatusBlock->Status = ERROR_INSUFFICIENT_BUFFER;
+                return TRUE;
+            }
+
+            VirtioGpuMpCancelFlushTimer(VirtioGpuMpDeviceExtension);
+            Result = VirtioGpuMpMapVideoMemory(
+                VirtioGpuMpDeviceExtension,
+                (PVIDEO_MEMORY)RequestPacket->InputBuffer,
+                (PVIDEO_MEMORY_INFORMATION)RequestPacket->OutputBuffer,
+                RequestPacket->StatusBlock);
+            break;
+        }
+
+        case IOCTL_VIDEO_UNMAP_VIDEO_MEMORY:
+        {
+            TRACE_(IHVVIDEO, "VirtioGpuMpStartIO IOCTL_VIDEO_UNMAP_VIDEO_MEMORY\n");
+
+            if (RequestPacket->InputBufferLength < sizeof(VIDEO_MEMORY))
+            {
+                RequestPacket->StatusBlock->Status = ERROR_INSUFFICIENT_BUFFER;
+                return TRUE;
+            }
+
+            VirtioGpuMpCancelFlushTimer(VirtioGpuMpDeviceExtension);
+            Result = VirtioGpuMpUnmapVideoMemory(
+                VirtioGpuMpDeviceExtension,
+                (PVIDEO_MEMORY)RequestPacket->InputBuffer,
+                RequestPacket->StatusBlock);
+            break;
+        }
+
+        case IOCTL_VIDEO_RESET_DEVICE:
+        {
+            TRACE_(IHVVIDEO, "VirtioGpuMpStartIO IOCTL_VIDEO_RESET_DEVICE\n");
+
+            VirtioGpuMpCancelFlushTimer(VirtioGpuMpDeviceExtension);
+            Result = VirtioGpuMpReset(
+                VirtioGpuMpDeviceExtension,
+                RequestPacket->StatusBlock);
+            break;
+        }
+
+        IOCTL_VIDEO_CREATE_2D_RESOURCE:
+        {
+            TRACE_(IHVVIDEO, "VirtioGpuMpStartIO IOCTL_VIDEO_CREATE_2D_RESOURCE\n");
+
+            if (RequestPacket->InputBufferLength < sizeof(VIDEO_CREATE_2D_RESOURCE))
+            {
+                RequestPacket->StatusBlock->Status = ERROR_INSUFFICIENT_BUFFER;
+                return TRUE;
+            }
+            if (RequestPacket->OutputBufferLength < sizeof(VIDEO_RESOURCE_ID))
+            {
+                RequestPacket->StatusBlock->Status = ERROR_INSUFFICIENT_BUFFER;
+                return TRUE;
+            }
+
+            VirtioGpuMpCancelFlushTimer(VirtioGpuMpDeviceExtension);
+            Result = VirtioGpuMpCreate2DResource(
+                VirtioGpuMpDeviceExtension,
+                (PVIDEO_CREATE_2D_RESOURCE)RequestPacket->InputBuffer,
+                (PVIDEO_RESOURCE_ID)RequestPacket->OutputBuffer,
                 RequestPacket->StatusBlock);
             break;
         }
@@ -674,7 +1043,76 @@ VirtioGpuMpStartIO(
         RequestPacket->StatusBlock->Status = NO_ERROR;
     }
 
+    VirtioGpuMpStartFlushTimer(VirtioGpuMpDeviceExtension);
+
     return TRUE;
+}
+
+VOID
+NTAPI
+FlushDpcRoutine(IN PKDPC Dpc,
+                IN PVOID DeferredContext,
+                IN PVOID SystemArgument1,
+                IN PVOID SystemArgument2)
+{
+    PVIRTIOGPUMP_DEVICE_EXTENSION VirtioGpuMpDeviceExtension = (PVIRTIOGPUMP_DEVICE_EXTENSION)DeferredContext;
+
+    VideoPortAcquireSpinLockAtDpcLevel((PVOID)VirtioGpuMpDeviceExtension, VirtioGpuMpDeviceExtension->Lock);
+
+    if(VirtioGpuMpDeviceExtension->ScanoutResourceID)
+    {
+        PVIRTIOGPUMP_MODE CurrentMode =
+            &VirtioGpuMpDeviceExtension->SavedModes[VirtioGpuMpDeviceExtension->CurrentMode];
+
+        {
+            PVIRTIOGPUMP_TRANSFER_TO_HOST_2D Request = (PVIRTIOGPUMP_TRANSFER_TO_HOST_2D)VideoPortAllocatePool(
+                (PVOID)VirtioGpuMpDeviceExtension, VpNonPagedPoolCacheAligned,
+                sizeof(VIRTIOGPUMP_TRANSFER_TO_HOST_2D), VGPU_TAG);
+            Request->Header.Type = VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D;
+            Request->Rect.X = Request->Rect.Y = 0;
+            Request->Rect.Width = CurrentMode->Rect.Width;
+            Request->Rect.Height = CurrentMode->Rect.Height;
+            Request->ResourceID = VirtioGpuMpDeviceExtension->ScanoutResourceID;
+            Request->Offset = 0;
+
+            PVIRTIOGPUMP_CONTROL_HEADER Res = NULL;
+            if(VirtioGpuMpSendCommandResponse(VirtioGpuMpDeviceExtension,
+                (PVOID)Request, sizeof(VIRTIOGPUMP_TRANSFER_TO_HOST_2D),
+                (PVOID *)&Res, sizeof(VIRTIOGPUMP_CONTROL_HEADER)) == FALSE)
+            {
+                VideoPortReleaseSpinLockFromDpcLevel((PVOID)VirtioGpuMpDeviceExtension, VirtioGpuMpDeviceExtension->Lock);
+                return;
+            }
+
+            VideoPortFreePool((PVOID)VirtioGpuMpDeviceExtension, Request);
+            VideoPortFreePool((PVOID)VirtioGpuMpDeviceExtension, Res);
+        }
+
+        {
+            PVIRTIOGPUMP_RESOURCE_FLUSH Request = (PVIRTIOGPUMP_RESOURCE_FLUSH)VideoPortAllocatePool(
+                (PVOID)VirtioGpuMpDeviceExtension, VpNonPagedPoolCacheAligned,
+                sizeof(VIRTIOGPUMP_RESOURCE_FLUSH), VGPU_TAG);
+            Request->Header.Type = VIRTIO_GPU_CMD_RESOURCE_FLUSH;
+            Request->Rect.X = Request->Rect.Y = 0;
+            Request->Rect.Width = CurrentMode->Rect.Width;
+            Request->Rect.Height = CurrentMode->Rect.Height;
+            Request->ResourceID = VirtioGpuMpDeviceExtension->ScanoutResourceID;
+
+            PVIRTIOGPUMP_CONTROL_HEADER Res = NULL;
+            if(VirtioGpuMpSendCommandResponse(VirtioGpuMpDeviceExtension,
+                (PVOID)Request, sizeof(VIRTIOGPUMP_RESOURCE_FLUSH),
+                (PVOID *)&Res, sizeof(VIRTIOGPUMP_CONTROL_HEADER)) == FALSE)
+            {
+                VideoPortReleaseSpinLockFromDpcLevel((PVOID)VirtioGpuMpDeviceExtension, VirtioGpuMpDeviceExtension->Lock);
+                return;
+            }
+
+            VideoPortFreePool((PVOID)VirtioGpuMpDeviceExtension, Request);
+            VideoPortFreePool((PVOID)VirtioGpuMpDeviceExtension, Res);
+        }
+    }
+
+    VideoPortReleaseSpinLockFromDpcLevel((PVOID)VirtioGpuMpDeviceExtension, VirtioGpuMpDeviceExtension->Lock);
 }
 
 /*

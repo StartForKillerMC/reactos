@@ -10,7 +10,7 @@ HKLM,"SYSTEM\CurrentControlSet\Services\virtiogpump","Type",0x00010001,0x0000000
 HKLM,"SYSTEM\CurrentControlSet\Services\virtiogpump\Video","Service",0x00000000,"virtiogpump"
 
 HKLM,"SYSTEM\CurrentControlSet\Services\virtiogpump\Device0","Device Description",0x00000000,"VirtIO Graphics Adapter"
-HKLM,"SYSTEM\CurrentControlSet\Services\virtiogpump\Device0","InstalledDisplayDrivers",0x00010000,"framebuf"
+HKLM,"SYSTEM\CurrentControlSet\Services\virtiogpump\Device0","InstalledDisplayDrivers",0x00010000,"virtiogpudisp"
 HKLM,"SYSTEM\CurrentControlSet\Services\virtiogpump\Device0","VgaCompatible",0x00010001,0
 HKLM,"SYSTEM\CurrentControlSet\Services\virtiogpump\Device0","DefaultSettings.XResolution",0x00010001,800
 HKLM,"SYSTEM\CurrentControlSet\Services\virtiogpump\Device0","DefaultSettings.YResolution",0x00010001,600

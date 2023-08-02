@@ -29,13 +29,13 @@ CopyFiles = VirtIoGpu.Miniport_CopyFiles, VirtIoGpu.Display_CopyFiles
 virtiogpump.sys
 
 [VirtIoGpu.Display_CopyFiles]
-framebuf.dll
+virtiogpudisp.dll
 
 [VirtIoGpu.SoftwareSettings]
 AddReg = VirtIoGpu_SoftwareSettings
 
 [VirtIoGpu_SoftwareSettings]
-HKR,, InstalledDisplayDrivers, %REG_MULTI_SZ%, framebuf
+HKR,, InstalledDisplayDrivers, %REG_MULTI_SZ%, virtiogpudisp
 HKR,, VgaCompatible,           %REG_DWORD%,    0
 
 [VirtIoGpu.Services]
