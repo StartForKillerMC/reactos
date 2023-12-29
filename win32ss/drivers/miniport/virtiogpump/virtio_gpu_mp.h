@@ -16,6 +16,8 @@
 #include <windef.h>
 #include <wdmguid.h>
 
+#include "virtio_gpu_ioctl.h"
+
 #pragma pack(push, 1)
 typedef struct
 {
@@ -214,18 +216,34 @@ typedef struct {
 } VIRTIOGPUMP_RESOURCE_FLUSH, *PVIRTIOGPUMP_RESOURCE_FLUSH;
 #pragma pack(pop)
 
-enum virtio_gpu_formats {
-    VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM  = 1,
-    VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM  = 2,
-    VIRTIO_GPU_FORMAT_A8R8G8B8_UNORM  = 3,
-    VIRTIO_GPU_FORMAT_X8R8G8B8_UNORM  = 4,
+#pragma pack(push, 1)
+typedef struct {
+    VIRTIOGPUMP_CONTROL_HEADER Header;
+    ULONG NameLength;
+    ULONG Padding;
+    UCHAR DebugName[64];
+} VIRTIOGPUMP_CREATE_CONTEXT, *PVIRTIOGPUMP_CREATE_CONTEXT;
+#pragma pack(pop)
 
-    VIRTIO_GPU_FORMAT_R8G8B8A8_UNORM  = 67,
-    VIRTIO_GPU_FORMAT_X8B8G8R8_UNORM  = 68,
+#pragma pack(push, 1)
+typedef struct {
+    ULONG ScanoutID;
+    ULONG X;
+	ULONG Y;
+    ULONG Padding;
+} VIRTIOGPUMP_CURSOR_POS, *PVIRTIOGPUMP_CURSOR_POS;
+#pragma pack(pop)
 
-    VIRTIO_GPU_FORMAT_A8B8G8R8_UNORM  = 121,
-    VIRTIO_GPU_FORMAT_R8G8B8X8_UNORM  = 134,
-};
+#pragma pack(push, 1)
+typedef struct {
+    VIRTIOGPUMP_CONTROL_HEADER Header;
+    VIRTIOGPUMP_CURSOR_POS Pos;
+    ULONG ResourceID;
+    ULONG HotX;
+    ULONG HotY;
+    ULONG Padding;
+} VIRTIOGPUMP_UPDATE_CURSOR, *PVIRTIOGPUMP_UPDATE_CURSOR;
+#pragma pack(pop)
 
 enum virtio_gpu_ctrl_type {
         /* 2d commands */
@@ -303,9 +321,11 @@ typedef struct
     PHYSICAL_ADDRESS PhysFramebuffer;
     ULONG PhysFramebufferLength;
 
-    PVP_DMA_ADAPTER DmaAdapater;
-
+    PVP_DMA_ADAPTER DmaAdapter;
     ULONG ResourceCurrentAllocatorIdx;
+    ULONG ContextCurrentAllocatorIdx;
+
+    LIST_ENTRY Resource2DListHead;
 
     BOOLEAN ModesSaved;
     VIRTIOGPUMP_MODE SavedModes[16];
@@ -314,23 +334,26 @@ typedef struct
 
     KTIMER FlushTimer;
     KDPC FlushDpc;
-    PSPIN_LOCK  Lock;
+    PSPIN_LOCK  CommandLock;
+    PSPIN_LOCK  CursorLock;
+    PSPIN_LOCK  DpcLock;
+    PSPIN_LOCK  CommandCompleteLock;
+    volatile UCHAR DpcFinished;
 
     PVOID Framebuffer;
     ULONG ScanoutResourceID;
+
+    ULONG CurrentContextResourceID;
 } VIRTIOGPUMP_DEVICE_EXTENSION, *PVIRTIOGPUMP_DEVICE_EXTENSION;
 
 #define VGPU_TAG ((ULONG)'mgvD')
 
-typedef struct _VIDEO_CREATE_2D_RESOURCE {
-  ULONG Width;
-  ULONG Height;
-  ULONG Format;
-} VIDEO_CREATE_2D_RESOURCE, *PVIDEO_CREATE_2D_RESOURCE;
-
-typedef struct _VIDEO_CREATE_2D_RESOURCE {
-  ULONG ResourceID;
-} VIDEO_RESOURCE_ID, *PVIDEO_RESOURCE_ID;
-
-#define IOCTL_VIDEO_CREATE_2D_RESOURCE \
-  CTL_CODE(FILE_DEVICE_VIDEO, 0x800, METHOD_BUFFERED, FILE_ANY_ACCESS)
+typedef struct {
+    LIST_ENTRY ListEntry;
+    ULONG ResourceID;
+    PHYSICAL_ADDRESS PhysAddressNonAligned;
+    PVOID PhysAddress;
+    PVOID VirtAddressNonAligned;
+    PVOID VirtAddress;
+    ULONG BufferLength;
+} RESOURCE_2D_ENTRY, *PRESOURCE_2D_ENTRY;

@@ -1,0 +1,5 @@
+[AddReg]
+HKLM, "SOFTWARE\Microsoft\Windows NT\CurrentVersion\OpenGLDrivers\VIRTIOGPUICD","DLL",0x00000000,"virtiogpuicd"
+HKLM, "SOFTWARE\Microsoft\Windows NT\CurrentVersion\OpenGLDrivers\VIRTIOGPUICD","Version",0x00010001,1
+HKLM, "SOFTWARE\Microsoft\Windows NT\CurrentVersion\OpenGLDrivers\VIRTIOGPUICD","DriverVersion",0x00010001,1
+HKLM, "SOFTWARE\Microsoft\Windows NT\CurrentVersion\OpenGLDrivers\VIRTIOGPUICD","Flags",0x00010001,0

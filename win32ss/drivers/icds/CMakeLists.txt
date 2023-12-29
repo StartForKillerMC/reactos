@@ -1,0 +1,2 @@
+
+add_subdirectory(virtio_gpu_icd)

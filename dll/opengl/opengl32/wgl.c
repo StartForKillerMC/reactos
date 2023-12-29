@@ -79,7 +79,7 @@ get_dc_data_ex(HDC hdc, INT format, UINT size, PIXELFORMATDESCRIPTOR *descr)
         data->nb_icd_formats = data->icd_data->DrvDescribePixelFormat(hdc, format, size, descr);
     else
         data->nb_icd_formats = 0;
-    TRACE("ICD %S has %u formats for HDC %x.\n", data->icd_data ? data->icd_data->DriverName : NULL, data->nb_icd_formats, hdc);
+    ERR("ICD %S has %u formats for HDC %x.\n", data->icd_data ? data->icd_data->DriverName : NULL, data->nb_icd_formats, hdc);
     data->nb_sw_formats = sw_DescribePixelFormat(hdc, 0, 0, NULL);
     data->next = dc_data_list;
     dc_data_list = data;
@@ -404,13 +404,13 @@ HGLRC WINAPI wglCreateContext(HDC hdc)
 
     if(!dc_data->icd_data)
     {
-        TRACE("Calling SW implementation.\n");
+        ERR("Calling SW implementation.\n");
         dhglrc = sw_CreateContext(dc_data);
         TRACE("done\n");
     }
     else
     {
-        TRACE("Calling ICD.\n");
+        ERR("Calling ICD.\n");
         dhglrc = dc_data->icd_data->DrvCreateContext(hdc);
     }
 

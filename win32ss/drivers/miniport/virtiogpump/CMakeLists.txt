@@ -8,7 +8,7 @@ add_library(virtiogpump MODULE
     virtio_gpu_mp.rc)
 
 set_module_type(virtiogpump kernelmodedriver)
-add_importlibs(virtiogpump ntoskrnl videoprt)
+add_importlibs(virtiogpump ntoskrnl hal videoprt)
 add_pch(virtiogpump virtio_gpu_mp.h SOURCE)
 
 add_cd_file(TARGET virtiogpump DESTINATION reactos/system32/drivers FOR all)

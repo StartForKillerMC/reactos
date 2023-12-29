@@ -6,6 +6,9 @@
  */
 
 #include "virtio_gpu_disp.h"
+#include "../../miniport/virtiogpump/virtio_gpu_ioctl.h"
+#include "virtio_gpu_esc.h"
+#include <wchar.h>
 
 static DRVFN DrvFunctionTable[] =
 {
@@ -18,7 +21,8 @@ static DRVFN DrvFunctionTable[] =
     {INDEX_DrvAssertMode, (PFN)DrvAssertMode},
     {INDEX_DrvSetPalette, (PFN)DrvSetPalette},
     {INDEX_DrvSetPointerShape, (PFN)DrvSetPointerShape},
-    {INDEX_DrvMovePointer, (PFN)DrvMovePointer}
+    {INDEX_DrvMovePointer, (PFN)DrvMovePointer},
+    {INDEX_DrvEscape, (PFN)DrvEscape}
 };
 
 /*
@@ -130,6 +134,92 @@ DrvDisablePDEV(
     }
 
     EngFreeMem(dhpdev);
+}
+
+typedef struct
+{
+    DWORD dwVersion;
+    DWORD dwDriverVersion;
+    WCHAR szDriverName[256];
+} OPENGL_INFO, *POPENGL_INFO;
+
+ULONG APIENTRY
+DrvEscape(
+    IN SURFOBJ *pso,
+    IN ULONG iEsc,
+    IN ULONG cjIn,
+    IN PVOID pvIn,
+    IN ULONG cjOut,
+    OUT PVOID pvOut)
+{
+    PPDEV ppdev = (PPDEV)pso->dhpdev;
+    ULONG ulTemp;
+
+    switch(iEsc) {
+        case QUERYESCSUPPORT:
+        {
+            if(cjIn < sizeof(DWORD)) return FALSE;
+            DWORD escCode = *(PDWORD)pvIn;
+
+            switch(escCode) {
+                case OPENGL_GETINFO:
+                    return sizeof(DWORD);
+                default:
+                    return FALSE;
+            }
+        }
+
+        case OPENGL_GETINFO:
+        {
+            if(cjOut < sizeof(OPENGL_INFO)) return FALSE;
+            POPENGL_INFO info = (POPENGL_INFO)pvOut;
+
+            info->dwVersion = 1;
+            info->dwDriverVersion = 1;
+            wcscpy(info->szDriverName, L"VIRTIOGPUICD");
+
+            return cjOut;
+        }
+
+        case VIRTIO_GPU_ESC_CREATE_CONTEXT:
+        {
+            if(cjIn < sizeof(VIRTIO_GPU_CREATE_CONTEXT)) return FALSE;
+            if(cjOut < sizeof(VIRTIO_GPU_RESOURCE_ID)) return FALSE;
+            PVIRTIO_GPU_CREATE_CONTEXT contextRequest = (PVIRTIO_GPU_CREATE_CONTEXT)pvIn;
+            PVIRTIO_GPU_RESOURCE_ID resourceIdResponse = (PVIRTIO_GPU_RESOURCE_ID)pvOut;
+
+            VIDEO_CREATE_CONTEXT createContext;
+            createContext.NameLength = contextRequest->NameLength;
+            strncpy((char *)createContext.Name, (char *)contextRequest->Name, sizeof(createContext.Name));
+
+            VIDEO_RESOURCE_ID resultResourceId;
+            if (EngDeviceIoControl(ppdev->hDriver, IOCTL_VIRTIOGPU_CREATE_CONTEXT, &createContext, sizeof(createContext), &resultResourceId, sizeof(resultResourceId), &ulTemp))
+            {
+                return FALSE;
+            }
+
+            resourceIdResponse->ResourceID = resultResourceId.ResourceID;
+
+            return sizeof(VIRTIO_GPU_RESOURCE_ID);
+        }
+
+        case VIRTIO_GPU_ESC_SET_CONTEXT:
+        {
+            if(cjIn < sizeof(VIRTIO_GPU_RESOURCE_ID)) return FALSE;
+            PVIRTIO_GPU_RESOURCE_ID resourceIdRequest = (PVIRTIO_GPU_RESOURCE_ID)pvIn;
+
+            VIDEO_RESOURCE_ID resourceId;
+            resourceId.ResourceID = resourceIdRequest->ResourceID;
+            if (EngDeviceIoControl(ppdev->hDriver, IOCTL_VIRTIOGPU_SET_CONTEXT, &resourceId, sizeof(resourceId), NULL, 0, &ulTemp))
+            {
+                return FALSE;
+            }
+
+            return TRUE;
+        }
+    }
+
+    return FALSE; //Not supported
 }
 
 VOID

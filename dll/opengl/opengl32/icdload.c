@@ -299,7 +299,7 @@ custom_end:
 {                                                       \
     data->x = (void*)GetProcAddress(data->hModule, #x); \
     if(!data->x) {                                      \
-        ERR("%S lacks " #x "!\n", DllName);             \
+        ERR("%S lacks " #x "! LastError: 0x%x\n", DllName, GetLastError()); \
         goto fail;                                      \
     }                                                   \
 } while(0)

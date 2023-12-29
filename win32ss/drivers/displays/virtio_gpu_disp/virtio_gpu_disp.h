@@ -37,6 +37,13 @@ typedef struct _PDEV
     DWORD iDitherFormat;
     ULONG MemHeight;
     ULONG MemWidth;
+
+    //Pointer
+    PVOID PointerVirtAddress;
+    ULONG PointerResourceID;
+    ULONG PointerWidth;
+    ULONG PointerHeight;
+    HSURF PointerSurface;
 } PDEV, *PPDEV;
 
 #define DEVICE_NAME	L"virtiogpudisp"
@@ -119,3 +126,33 @@ DrvMovePointer(
    IN LONG x,
    IN LONG y,
    IN RECTL *prcl);
+
+BOOLEAN
+VirtioGpuDispRegenaretPointerResource(
+   PPDEV ppdev,
+   ULONG Width,
+   ULONG Height);
+
+BOOLEAN
+VirtioGpuDispMoveMouse(
+   PPDEV ppdev,
+   ULONG x,
+   ULONG y);
+
+BOOLEAN
+VirtioGpuDispTransferResource(
+   PPDEV ppdev,
+   ULONG ResourceID,
+   ULONG Width,
+   ULONG Height,
+   PVOID Buffer,
+   ULONG BufferLength);
+
+ULONG APIENTRY
+DrvEscape(
+    IN SURFOBJ *pso,
+    IN ULONG iEsc,
+    IN ULONG cjIn,
+    IN PVOID pvIn,
+    IN ULONG cjOut,
+    OUT PVOID pvOut);
